@@ -2,7 +2,19 @@ name: Build Linux runtime
 
 on:
   workflow_call:
+    inputs:
+      compare_run_id:
+        description: Optional prior successful run ID for hosted determinism comparison
+        required: false
+        type: string
+        default: ''
   workflow_dispatch:
+    inputs:
+      compare_run_id:
+        description: Optional prior successful run ID for hosted determinism comparison
+        required: false
+        type: string
+        default: ''
   push:
     branches:
       - main
@@ -590,6 +602,74 @@ jobs:
           if-no-files-found: warn
           compression-level: 0
           retention-days: 1
+
+  manylinux-determinism:
+    if: ${{ inputs.compare_run_id != '' }}
+    needs:
+      - manylinux-runtime
+      - manylinux-compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Download current glibc 2.17 runtime
+        uses: actions/download-artifact@v8
+        with:
+          name: featool-octave-runtime-linux-x64-glibc217
+          path: ${{ runner.temp }}/determinism/current
+
+      - name: Download comparison run glibc 2.17 runtime
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPARE_RUN_ID: ${{ inputs.compare_run_id }}
+        run: |
+          set -euxo pipefail
+          mkdir -p "$RUNNER_TEMP/determinism/previous"
+          gh run download "$COMPARE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name featool-octave-runtime-linux-x64-glibc217 \
+            --dir "$RUNNER_TEMP/determinism/previous"
+
+      - name: Compare fresh hosted build outputs
+        shell: bash
+        env:
+          COMPARE_RUN_ID: ${{ inputs.compare_run_id }}
+        run: |
+          set -euxo pipefail
+          current="$RUNNER_TEMP/determinism/current"
+          previous="$RUNNER_TEMP/determinism/previous"
+          evidence="$RUNNER_TEMP/determinism/evidence"
+          mkdir -p "$evidence"
+
+          for directory in "$current" "$previous"; do
+            (
+              cd "$directory"
+              sha256sum --check --strict featool-octave-runtime-linux-x64.tar.zst.sha256
+            )
+          done
+
+          current_sha="$(sha256sum "$current/featool-octave-runtime-linux-x64.tar.zst" | awk '{print $1}')"
+          previous_sha="$(sha256sum "$previous/featool-octave-runtime-linux-x64.tar.zst" | awk '{print $1}')"
+          printf 'current_run=%s\ncomparison_run=%s\ncurrent_sha256=%s\ncomparison_sha256=%s\n' \
+            "$GITHUB_RUN_ID" "$COMPARE_RUN_ID" "$current_sha" "$previous_sha" \
+            | tee "$evidence/comparison.txt"
+          test "$current_sha" = "$previous_sha"
+          cmp \
+            "$current/featool-octave-runtime-linux-x64.manifest.json" \
+            "$previous/featool-octave-runtime-linux-x64.manifest.json"
+          printf 'archive_identity=pass\nmanifest_identity=pass\n' \
+            | tee -a "$evidence/comparison.txt"
+
+      - name: Upload determinism evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: featool-octave-runtime-linux-x64-glibc217-determinism-evidence
+          path: ${{ runner.temp }}/determinism/evidence
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 7
 
   build:
     runs-on: ubuntu-24.04

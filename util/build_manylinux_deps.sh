@@ -118,8 +118,8 @@ while IFS=$'\t' read -r name version filename digest url; do
 done < "$lock_file"
 
 dependencies=(
-  zlib openssl ncurses readline pcre2 openblas fftw hdf5
-  suitesparse arpack-ng qhull libtool rapidjson curl
+  zlib openssl ncurses readline pcre2 hdf5 qhull libtool rapidjson
+  openblas fftw suitesparse arpack-ng curl
 )
 
 for name in "${dependencies[@]}"; do
@@ -325,8 +325,8 @@ build_openblas() {
     NO_AFFINITY=1 USE_TLS=0 INTERFACE64=0 CONSISTENT_FPCSR=1 NO_STATIC=1
     COMMON_OPT="$CFLAGS"
   )
-  record_command openblas make "${options[@]}"
-  make -j"$jobs" "${options[@]}"
+  record_command openblas make "${options[@]}" shared
+  make -j"$jobs" "${options[@]}" shared
   make PREFIX="$prefix" "${options[@]}" install
   popd >/dev/null
 }
