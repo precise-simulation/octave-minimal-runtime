@@ -12,9 +12,10 @@ Usage: build_octave_runtime_linux.sh \
   --source-archive NAME --source-sha256 SHA256 \
   --build-image IMAGE --glibc-baseline VERSION [--jobs N] [--validate]
 
-Build GNU Octave 11.3.0 from source, install it into an isolated staging prefix,
-prune development content, assemble a relocatable ELF dependency closure, and
-write runtime-manifest.json.  The current checkpoint is headless-only.
+Build GNU Octave 11.3.0 from source, install it into the disposable container's
+configured prefix, prune development content, assemble a relocatable ELF
+dependency closure, and write runtime-manifest.json.  The current checkpoint is
+headless-only.
 EOF
 }
 
@@ -97,9 +98,8 @@ esac
 
 mkdir -p "$build_dir" "$destination"
 object_dir="$build_dir/obj"
-stage_dir="$build_dir/stage"
 probe_dir="$build_dir/probe"
-mkdir -p "$object_dir" "$stage_dir" "$probe_dir"
+mkdir -p "$object_dir" "$probe_dir"
 
 configure_args=(
   "--prefix=$CONFIGURED_PREFIX"
@@ -115,11 +115,12 @@ configure_args=(
 )
 printf '%s\n' "${configure_args[@]}" > "$build_dir/configure-args.txt"
 
-common_flags="-O2 -g0 -fPIC -ffile-prefix-map=$source_dir=/usr/src/octave-$OCTAVE_VERSION -ffile-prefix-map=$build_dir=/usr/src/octave-build"
-export CFLAGS="${CFLAGS:-$common_flags}"
-export CXXFLAGS="${CXXFLAGS:-$common_flags}"
-export FFLAGS="${FFLAGS:-$common_flags}"
-export FCFLAGS="${FCFLAGS:-$common_flags}"
+configure_flags="-O2 -g0 -fPIC"
+compile_flags="$configure_flags -ffile-prefix-map=$source_dir=/usr/src/octave-$OCTAVE_VERSION -ffile-prefix-map=$build_dir=/usr/src/octave-build"
+export CFLAGS="${CFLAGS:-$configure_flags}"
+export CXXFLAGS="${CXXFLAGS:-$configure_flags}"
+export FFLAGS="${FFLAGS:-$configure_flags}"
+export FCFLAGS="${FCFLAGS:-$configure_flags}"
 export CPPFLAGS="${CPPFLAGS:-} -I/usr/include/hdf5/serial -I/usr/include/suitesparse"
 export LDFLAGS="${LDFLAGS:-} -L/usr/lib/x86_64-linux-gnu/hdf5/serial"
 export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1780272000}"
@@ -135,13 +136,30 @@ printf 'destination=%s\n' "$destination"
 
 pushd "$object_dir" >/dev/null
 "$source_dir/configure" "${configure_args[@]}" 2>&1 | tee "$build_dir/configure.out"
-make -j"$jobs"
-make DESTDIR="$stage_dir" install
+make -j"$jobs" \
+  CFLAGS="$compile_flags" \
+  CXXFLAGS="$compile_flags" \
+  FFLAGS="$compile_flags" \
+  FCFLAGS="$compile_flags"
+
+install_root="$CONFIGURED_PREFIX"
+if [[ -e "$install_root" ]]; then
+  printf 'error: configured install prefix already exists: %s\n' "$install_root" >&2
+  exit 1
+fi
+if [[ ! -w "$(dirname "$install_root")" ]]; then
+  printf 'error: configured install prefix parent is not writable: %s\n' "$(dirname "$install_root")" >&2
+  exit 1
+fi
+make install \
+  CFLAGS="$compile_flags" \
+  CXXFLAGS="$compile_flags" \
+  FFLAGS="$compile_flags" \
+  FCFLAGS="$compile_flags"
 popd >/dev/null
 
-install_root="$stage_dir$CONFIGURED_PREFIX"
 if [[ ! -x "$install_root/bin/octave-cli" ]]; then
-  printf 'error: staged octave-cli is missing: %s/bin/octave-cli\n' "$install_root" >&2
+  printf 'error: installed octave-cli is missing: %s/bin/octave-cli\n' "$install_root" >&2
   exit 1
 fi
 
@@ -170,6 +188,7 @@ if [[ ! -f "$probe_dir/octave_runtime_mex_probe.mex" ]]; then
 fi
 
 cp -a "$install_root/." "$destination/"
+rm -rf "$install_root"
 
 # Keep interpreter runtime content and remove development/documentation surfaces.
 rm -rf \
@@ -228,8 +247,7 @@ python3 "$runtime_tool" prepare \
   --glibc-baseline "$glibc_baseline" \
   --configure-args-file "$build_dir/configure-args.txt" \
   --forbidden-prefix "$source_dir" \
-  --forbidden-prefix "$build_dir" \
-  --forbidden-prefix "$stage_dir"
+  --forbidden-prefix "$build_dir"
 
 if [[ "$validate" -eq 1 ]]; then
   validation_home="$build_dir/validation-home"

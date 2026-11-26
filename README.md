@@ -75,8 +75,7 @@ entries. Non-glibc dependencies are copied into `lib/runtime-deps`; Octave-owned
 libraries are exposed there through relative symlinks. Every packaged ELF object
 receives an `$ORIGIN`-relative search path. Verification rejects unresolved
 dependencies, non-relative RPATH/RUNPATH entries, external symlink targets,
-non-x86-64 ELF objects, build/staging paths in ELF loader metadata, and
-build/staging paths in non-ELF runtime files.
+non-x86-64 ELF objects, and source/build paths anywhere in the delivered tree.
 
 The Linux manifest records file types, modes, regular-file sizes/SHA-256 values,
 symlink targets, build/compiler provenance, exact resolved `dpkg` package
