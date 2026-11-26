@@ -384,8 +384,10 @@ Implement in this order so failures are attributable to one layer at a time:
 
 ## Implementation progress
 
-As of 2026-11-26, `feat/manylinux-glibc217-workers` contains the first two
-implementation increments:
+As of 2026-11-26, `feat/manylinux-glibc217-workers` contains the first four
+implementation increments in source.  Hosted qualification is complete for the
+smoke/resolver layer and is currently progressing through the dependency-prefix
+build:
 
 - `.github/workflows/build-linux-runtime.yml` has a host-level
   `manylinux-smoke` job on `ubuntu-24.04`.  It pulls a digest-pinned
@@ -399,6 +401,15 @@ implementation increments:
   allowlist is baseline-aware, compiler runtimes cannot silently fall through to
   an ambient system copy, and copied-library provenance records the selected
   path, resolved source path, SHA-256, and search tier.
+- `util/manylinux-deps.lock` and `util/build_manylinux_deps.sh` define the pinned
+  private dependency stack.  The workflow downloads and verifies every archive
+  on the Ubuntu host, then builds the prefix inside the pinned manylinux image
+  with ABI and dependency evidence retained on failure as well as success.
+- `util/build_octave_runtime_linux.sh` accepts an explicit dependency prefix,
+  Python interpreter, and expected glibc/GCC identities.  The `manylinux-runtime`
+  job consumes the dependency-prefix artifact, mounts it read-only, builds and
+  validates Octave in the pinned container, and creates the public-named runtime
+  archive on the Ubuntu host.
 
 Hosted run `45818617122` at commit `42eb743` passed the `manylinux-smoke` job on
 `ubuntu-24.04`.  The pinned image reported CentOS 7 with glibc 2.17, GCC/G++/
@@ -411,6 +422,12 @@ for all 14 immutable dependency source archives before the private-prefix build
 was added.  These values are committed in `util/manylinux-deps.lock` and are
 verified again on the host before any archive is mounted into the build
 container.
+
+Dependency-prefix qualification is intentionally driven by hosted failures.
+Runs `45820452948`, `45821025169`, and `45821885036` identified and removed
+OpenSSL build-tool assumptions and the CentOS 7 ncurses fallback-tool mismatch;
+build evidence was uploaded for each failed attempt.  No local native build is
+used to substitute for these runner results.
 
 ## Acceptance checklist
 

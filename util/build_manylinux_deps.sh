@@ -260,8 +260,8 @@ build_readline() {
   pushd "$src" >/dev/null
   record_command readline ./configure --prefix="$prefix" --enable-shared --disable-static --with-curses --with-shared-termcap-library
   ./configure --prefix="$prefix" --enable-shared --disable-static --with-curses --with-shared-termcap-library
-  make -j"$jobs" SHLIB_LIBS="-L$prefix/lib -ltinfo"
-  make install SHLIB_LIBS="-L$prefix/lib -ltinfo"
+  make -j"$jobs" SHLIB_LIBS="-L$prefix/lib -ltinfow"
+  make install SHLIB_LIBS="-L$prefix/lib -ltinfow"
   popd >/dev/null
 }
 
