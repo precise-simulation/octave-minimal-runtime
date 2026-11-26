@@ -8,10 +8,10 @@ by the qualified FEATool runtime.
 
 The canonical GitHub-hosted build produces two profiles:
 
-- `headless-cli-featool`: 1,590 files and 100,792,709 payload bytes
-  (about 96.1 MiB), launched with
+- `headless-cli-featool`: 1,589 files and 100,698,366 payload bytes
+  (about 96.0 MiB), launched with
   `mingw64\bin\octave-cli.exe --no-window-system`;
-- `featool-qt-graphics`: 1,637 files and 182,080,545 payload bytes
+- `featool-qt-graphics`: 1,636 files and 181,986,202 payload bytes
   (about 173.6 MiB), adding the Qt runtime and plugins needed for native
   Octave figures and waitbars.
 
@@ -38,12 +38,15 @@ on `windows-2025`. It:
    against the embedded manifest;
 9. publishes `.7z` archives and SHA-256 files as workflow artifacts.
 
-Hosted run `45769526390` passed this complete path at commit `d3e14c0`.
-Its reproducible manifest SHA-256 values were
-`A68384AB108203DEE93268A87E0C99016195A1B95B86153546C19F07161B6785`
+Hosted run `45770870709` passed this complete path twice on independent
+`windows-2025` runner initializations at commit `6cad911`. Both attempts
+produced the same manifest SHA-256 values:
+`874FC57B890A537300CBB05B323B73E4B71A73C39620170B2FB40424E33ABEDB`
 for headless and
-`DAC1479E6531FD5179E1B991EB16858450A415CF3502B7FF421714489C405AAD`
-for Qt.
+`8018D391679965EA07EBB8569A379652685DCCAD1B5E3608D62D312FB4719570`
+for Qt. The builder removes Octave's generated bundled-package registry because
+its only cross-run difference is a wall-clock timestamp and all referenced
+bundled packages are already pruned from the runtime.
 
 ## Authenticated FEATool qualification
 

@@ -151,22 +151,30 @@ installation.
 
 The measurements above are the historical installed-Octave checkpoint. The
 canonical GitHub-hosted build from the pinned official archive is smaller.
-Hosted run `45769526390` at commit `d3e14c0` passed on `windows-2025` with:
+Hosted run `45770870709` at commit `6cad911` passed twice on independent
+`windows-2025` runner initializations with:
 
-- headless payload: 1,590 files, 100,792,709 bytes (about 96.1 MiB), manifest
+- headless payload: 1,589 files, 100,698,366 bytes (about 96.0 MiB), manifest
   SHA-256
-  `A68384AB108203DEE93268A87E0C99016195A1B95B86153546C19F07161B6785`;
-- Qt payload: 1,637 files, 182,080,545 bytes (about 173.6 MiB), manifest
+  `874FC57B890A537300CBB05B323B73E4B71A73C39620170B2FB40424E33ABEDB`;
+- Qt payload: 1,636 files, 181,986,202 bytes (about 173.6 MiB), manifest
   SHA-256
-  `DAC1479E6531FD5179E1B991EB16858450A415CF3502B7FF421714489C405AAD`;
+  `8018D391679965EA07EBB8569A379652685DCCAD1B5E3608D62D312FB4719570`;
 - headless numerical probe with a minimal runtime/system `PATH`: pass;
-- repeat-build manifest identity for both profiles: pass;
+- repeat-build manifest identity for both profiles within each run: pass;
+- manifest identity across two fresh hosted runner initializations: pass;
 - archive test, extraction, complete file-set/size/SHA-256 verification: pass;
 - GitHub artifact publication for both profiles: pass.
 
+The only cross-run difference found before this checkpoint was the first line
+of `share/octave/site/api-v61/octave_packages`, where Octave's
+`post-install.bat` writes the current UTC timestamp. Because the runtime
+already removes all bundled `share/octave/packages` and `lib/octave/packages`
+content, the builder now removes this stale package registry as well.
+
 ## Optional Qt graphics profile
 
-The canonical hosted default is the 96.1 MiB headless profile. For FEATool workflows
+The canonical hosted default is the 96.0 MiB headless profile. For FEATool workflows
 that need native Octave figures, `plot`, or `waitbar`, the builder supports an
 optional `-GraphicsSupport` switch.
 
@@ -390,7 +398,7 @@ Two distribution surfaces can use this same payload:
   technology.
 
 For the installer, make native Octave Qt graphics an optional component. The
-base install then carries the 96.1 MiB hosted headless Octave runtime; selecting the
+base install then carries the 96.0 MiB hosted headless Octave runtime; selecting the
 graphics component adds approximately 77.5 MiB and enables the 173.6 MiB hosted Qt
 profile. External geometry, meshing, and solver helpers remain separate FEATool
 application assets under `helpers/` and should not be folded into the Octave
@@ -460,7 +468,7 @@ The stripped Octave runtime is acceptable when:
 - redistribution includes the required GNU Octave license and corresponding
   source compliance material.
 
-The current checkpoint is a deterministic GitHub-hosted 96.1 MiB headless
+The current checkpoint is a deterministic GitHub-hosted 96.0 MiB headless
 Octave payload and 173.6 MiB Qt payload with reproducible manifests and verified
 archives. Focused FEATool numerical, MEX, embedded CPython, Tk, plotting, and
 waitbar qualification has passed against development inputs. Production
