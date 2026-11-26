@@ -160,6 +160,11 @@ jobs:
             "$MANYLINUX_IMAGE" \
             /bin/bash -lc '
               set -eo pipefail
+              yum install -y perl-IPC-Cmd-0.80-4.el7
+              {
+                rpm -q perl
+                rpm -q perl-IPC-Cmd
+              } | tee /evidence/build-tools.txt
               set +u
               source /opt/rh/devtoolset-10/enable
               set -u
