@@ -562,6 +562,74 @@ def max_required_abi_versions(root: Path) -> dict[str, str | None]:
     return maxima
 
 
+def required_abi_versions_for_elf(path: Path) -> dict[str, str | None]:
+    found: dict[str, set[str]] = {name: set() for name in ("GLIBC", "GLIBCXX", "CXXABI", "GCC")}
+    result = run(["objdump", "-T", str(path)], check=False)
+    if result.returncode == 0:
+        for line in result.stdout.splitlines():
+            if "*UND*" not in line:
+                continue
+            for family, version in VERSION_RE.findall(line):
+                found[family].add(version)
+    return {
+        family: max(versions, key=version_key) if versions else None
+        for family, versions in found.items()
+    }
+
+
+def audit_qualification_elfs(
+    root: Path,
+    paths: Iterable[Path],
+    *,
+    glibc_baseline: str,
+    host_allowlist: Iterable[str],
+) -> list[dict[str, object]]:
+    internal = internal_library_map(root)
+    host = set(host_allowlist)
+    evidence: list[dict[str, object]] = []
+    failures: list[str] = []
+
+    for raw_path in paths:
+        path = raw_path.resolve()
+        label = str(path)
+        if not is_elf(path):
+            failures.append(f"qualification ELF is missing or invalid: {label}")
+            continue
+
+        header = run(["readelf", "-h", str(path)]).stdout
+        if "Class:                             ELF64" not in header:
+            failures.append(f"qualification ELF is not ELF64: {label}")
+        if "Machine:                           Advanced Micro Devices X86-64" not in header:
+            failures.append(f"qualification ELF is not x86-64: {label}")
+
+        abi = required_abi_versions_for_elf(path)
+        try:
+            enforce_glibc_baseline(abi, glibc_baseline)
+        except RuntimeErrorWithContext as exc:
+            failures.append(f"qualification ELF {label}: {exc}")
+
+        needed = needed_libraries(path)
+        unresolved = [soname for soname in needed if soname not in host and soname not in internal]
+        if unresolved:
+            failures.append(
+                f"qualification ELF {label} has non-host dependencies absent from runtime: "
+                + ", ".join(unresolved)
+            )
+
+        evidence.append(
+            {
+                "path": label,
+                "sha256": sha256_file(path),
+                "abi_max_required": abi,
+                "needed": needed,
+            }
+        )
+
+    if failures:
+        raise RuntimeErrorWithContext("\n".join(failures[:40]))
+    return evidence
+
+
 def enforce_glibc_baseline(abi: dict[str, str | None], baseline: str) -> None:
     required = abi.get("GLIBC")
     if required is None:
@@ -738,6 +806,7 @@ def write_manifest(
     args: argparse.Namespace,
     bundled_sonames: list[str],
     dependency_provenance: list[dict[str, str]],
+    qualification_evidence: list[dict[str, object]],
 ) -> dict[str, object]:
     root = args.runtime_root.resolve()
     entries = manifest_entries(root)
@@ -767,6 +836,13 @@ def write_manifest(
         "system_library_dirs": [str(path.resolve()) for path in system_library_dirs],
         "runtime_dependency_sonames": bundled_sonames,
         "runtime_dependency_provenance": dependency_provenance,
+        "qualification_elfs": [
+            {
+                **item,
+                "path": Path(str(item["path"])).name,
+            }
+            for item in qualification_evidence
+        ],
         "configure_args": read_configure_args(args.configure_args_file),
         "build_provenance": build_provenance(),
         **totals,
@@ -872,8 +948,8 @@ def run_smoke(root: Path) -> None:
         env = {
             "HOME": home,
             "PATH": "/usr/bin:/bin",
-            "LANG": "C.UTF-8",
-            "LC_ALL": "C.UTF-8",
+            "LANG": "C",
+            "LC_ALL": "C",
         }
         expression = (
             "assert(strcmp(OCTAVE_VERSION,'11.3.0'));"
@@ -935,12 +1011,18 @@ def prepare(args: argparse.Namespace) -> int:
     host_allowlist = host_library_allowlist(args.glibc_baseline)
     audit_dependency_resolution(root, host_allowlist)
     audit_compiler_runtime_closure(root)
+    qualification_evidence = audit_qualification_elfs(
+        root,
+        args.qualification_elf,
+        glibc_baseline=args.glibc_baseline,
+        host_allowlist=host_allowlist,
+    )
     scan_forbidden_prefixes(
         root,
         args.forbidden_prefix,
         octave_source_prefix=args.octave_source_prefix,
     )
-    manifest = write_manifest(args, bundled, dependency_provenance)
+    manifest = write_manifest(args, bundled, dependency_provenance, qualification_evidence)
     print("runtime_prepare=pass")
     print(f"runtime_files={manifest['payload_files']}")
     print(f"runtime_bytes={manifest['payload_bytes']}")
@@ -948,6 +1030,12 @@ def prepare(args: argparse.Namespace) -> int:
     print(f"runtime_glibcxx_max={manifest['abi_max_required'].get('GLIBCXX')}")
     print(f"runtime_cxxabi_max={manifest['abi_max_required'].get('CXXABI')}")
     print(f"runtime_gcc_max={manifest['abi_max_required'].get('GCC')}")
+    for item in qualification_evidence:
+        print(
+            "qualification_elf="
+            f"{item['path']} sha256={item['sha256']} "
+            f"abi={json.dumps(item['abi_max_required'], sort_keys=True)}"
+        )
     return 0
 
 
@@ -979,6 +1067,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--build-image", required=True)
     prepare_parser.add_argument("--glibc-baseline", required=True)
     prepare_parser.add_argument("--dependency-prefix", type=Path, action="append", default=[])
+    prepare_parser.add_argument("--qualification-elf", type=Path, action="append", default=[])
     prepare_parser.add_argument("--system-library-dir", type=Path, action="append")
     prepare_parser.add_argument("--configure-args-file", type=Path)
     prepare_parser.add_argument("--forbidden-prefix", action="append", default=[])

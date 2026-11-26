@@ -164,6 +164,28 @@ extract_source() {
   printf '%s\n' "$destination"
 }
 
+source_root_with_file() {
+  local root="$1"
+  local relative_file="$2"
+  if [[ -f "$root/$relative_file" ]]; then
+    printf '%s\n' "$root"
+    return 0
+  fi
+
+  local matches=()
+  while IFS= read -r candidate; do
+    matches+=("${candidate%/$relative_file}")
+  done < <(find "$root" -mindepth 2 -maxdepth 4 -type f -path "*/$relative_file" -print | LC_ALL=C sort)
+
+  if [[ "${#matches[@]}" -ne 1 ]]; then
+    printf 'error: expected exactly one %s below %s, found %s\n' \
+      "$relative_file" "$root" "${#matches[@]}" >&2
+    find "$root" -mindepth 1 -maxdepth 3 -type d -print | LC_ALL=C sort >&2
+    return 1
+  fi
+  printf '%s\n' "${matches[0]}"
+}
+
 record_command() {
   local name="$1"
   shift
@@ -326,6 +348,7 @@ build_fftw() {
 build_hdf5() {
   local src build
   src="$(extract_source hdf5)"
+  src="$(source_root_with_file "$src" configure)"
   build="$work_dir/build/hdf5"
   mkdir -p "$build"
   pushd "$build" >/dev/null
@@ -365,6 +388,10 @@ build_arpack_ng() {
     -DBUILD_SHARED_LIBS=ON \
     -DMPI=OFF \
     -DICB=OFF \
+    -DINTERFACE64=OFF \
+    -DPYTHON3=OFF \
+    -DEXAMPLES=OFF \
+    -DTESTS=OFF \
     -DBLA_VENDOR=OpenBLAS \
     -DBLAS_LIBRARIES="$prefix/lib/libopenblas.so" \
     -DLAPACK_LIBRARIES="$prefix/lib/libopenblas.so"

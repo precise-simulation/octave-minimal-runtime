@@ -185,6 +185,7 @@ export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1780272000}"
 export TZ="UTC"
 export LANG="C"
 export LC_ALL="C"
+export PYTHON="$python_command"
 
 printf 'octave_version=%s\n' "$OCTAVE_VERSION"
 printf 'build_image=%s\n' "$build_image"
@@ -238,6 +239,9 @@ EOF
 install_ld_path="$(find "$install_root/lib" -type d -print | paste -sd: -)"
 if [[ -n "$dependency_prefix" ]]; then
   install_ld_path="$install_ld_path:$dependency_prefix/lib:$dependency_prefix/lib64"
+fi
+if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+  install_ld_path="$install_ld_path:$LD_LIBRARY_PATH"
 fi
 env \
   PATH="$install_root/bin:$PATH" \
@@ -314,7 +318,8 @@ runtime_prepare_args=(
   --configure-args-file "$build_dir/configure-args.txt" \
   --octave-source-prefix "$source_dir" \
   --forbidden-prefix "$source_dir" \
-  --forbidden-prefix "$build_dir"
+  --forbidden-prefix "$build_dir" \
+  --qualification-elf "$probe_dir/octave_runtime_mex_probe.mex"
 )
 if [[ -n "$dependency_prefix" ]]; then
   runtime_prepare_args+=(--dependency-prefix "$dependency_prefix")
