@@ -162,7 +162,7 @@ jobs:
               set -eo pipefail
               yum install -y \
                 perl-IPC-Cmd-0.80-4.el7 \
-                perl-Time-Piece-1.20.1-297.el7
+                perl-Time-Piece-1.20.1-299.el7_9
               {
                 rpm -q perl
                 rpm -q perl-IPC-Cmd
@@ -199,7 +199,10 @@ jobs:
             -C "$MANYLINUX_DEPS_PREFIX" \
             -cf - . | zstd -19 -T0 -o "$archive"
 
-          sha256sum "$archive" > "$archive.sha256"
+          (
+            cd "$output"
+            sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256"
+          )
           cp -a "$MANYLINUX_DEPS_EVIDENCE/." "$output/"
           du -sh "$MANYLINUX_DEPS_PREFIX" "$archive"
 

@@ -225,15 +225,30 @@ build_ncurses() {
   local src
   src="$(extract_source ncurses)"
   pushd "$src" >/dev/null
-  local command=(
+  local base_command=(
     ./configure --prefix="$prefix" --with-shared --without-normal --without-debug
     --without-tests --without-ada --without-cxx --without-cxx-binding --without-gpm
     --enable-widec --enable-overwrite --with-termlib --enable-pc-files
     --with-pkg-config-libdir="$prefix/lib/pkgconfig"
-    --with-fallbacks=xterm,xterm-256color,screen,screen-256color,tmux,vt100,linux,dumb
   )
-  record_command ncurses "${command[@]}"
-  "${command[@]}"
+  record_command ncurses "${base_command[@]}"
+  "${base_command[@]}"
+  make -j"$jobs"
+  make install
+
+  # The CentOS 7 tic bundled in manylinux2014 is too old to compile all current
+  # ncurses 6.5 fallback entries.  Bootstrap the matching tic/infocmp first,
+  # then rebuild ncurses with those tools so fallback data is compiled into the
+  # shared libraries rather than depending on a target-host terminfo database.
+  make distclean
+  local fallback_command=(
+    "${base_command[@]}"
+    --with-fallbacks=xterm,xterm-256color,screen,screen-256color,tmux,vt100,linux,dumb
+    --with-tic-path="$prefix/bin/tic"
+    --with-infocmp-path="$prefix/bin/infocmp"
+  )
+  record_command ncurses "${fallback_command[@]}"
+  "${fallback_command[@]}"
   make -j"$jobs"
   make install
   popd >/dev/null
