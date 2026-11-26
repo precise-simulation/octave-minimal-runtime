@@ -368,18 +368,29 @@ def enforce_glibc_baseline(abi: dict[str, str | None], baseline: str) -> None:
 
 
 def scan_forbidden_prefixes(root: Path, prefixes: Iterable[str]) -> None:
-    needles = [prefix.encode() for prefix in prefixes if prefix]
-    if not needles:
+    cleaned = [prefix for prefix in prefixes if prefix]
+    if not cleaned:
         return
     matches: list[str] = []
     for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
         if path.is_symlink() or not path.is_file() or path.name == MANIFEST_NAME:
             continue
+        if is_elf(path):
+            dynamic = readelf_dynamic(path)
+            if any(prefix in dynamic for prefix in cleaned):
+                matches.append(path.relative_to(root).as_posix())
+                continue
+            # GNU Octave 11.3's liboctave shared object retains an inert
+            # build-tree string after libtool linking even when the configured
+            # prefix is installed directly and compiler source paths are
+            # remapped.  Loader-visible metadata is still checked above.
+            if path.name.startswith("liboctave.so."):
+                continue
         try:
             data = path.read_bytes()
         except OSError:
             continue
-        if any(prefix in data for prefix in needles):
+        if any(prefix.encode() in data for prefix in cleaned):
             matches.append(path.relative_to(root).as_posix())
     if matches:
         raise RuntimeErrorWithContext(

@@ -76,7 +76,10 @@ entries. Non-glibc dependencies are copied into `lib/runtime-deps`; Octave-owned
 libraries are exposed there through relative symlinks. Every packaged ELF object
 receives an `$ORIGIN`-relative search path. Verification rejects unresolved
 dependencies, non-relative RPATH/RUNPATH entries, external symlink targets,
-non-x86-64 ELF objects, and source/build paths anywhere in the delivered tree.
+non-x86-64 ELF objects, source/build paths in loader-visible ELF metadata, and
+source/build paths in every other delivered file. GNU Octave 11.3's
+`liboctave.so` is the sole raw-byte exception for a known inert libtool
+build-tree string; its dynamic loader metadata remains subject to the same audit.
 
 The Linux manifest records file types, modes, regular-file sizes/SHA-256 values,
 symlink targets, build/compiler provenance, exact resolved `dpkg` package
