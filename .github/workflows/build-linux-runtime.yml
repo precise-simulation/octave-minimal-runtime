@@ -83,11 +83,11 @@ jobs:
         run: |
           set -euxo pipefail
           cat /etc/os-release
-          ldd --version | head -n 1
-          gcc --version | head -n 1
-          g++ --version | head -n 1
-          gfortran --version | head -n 1
-          ld --version | head -n 1
+          ldd --version | sed -n '1p'
+          gcc --version | sed -n '1p'
+          g++ --version | sed -n '1p'
+          gfortran --version | sed -n '1p'
+          ld --version | sed -n '1p'
 
       - name: Download and verify GNU Octave source
         shell: bash
