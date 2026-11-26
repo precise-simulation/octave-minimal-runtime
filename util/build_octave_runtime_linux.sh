@@ -259,6 +259,13 @@ fi
 cp -a "$install_root/." "$destination/"
 rm -rf "$install_root"
 
+# Ship the qualification MEX with the runtime so the exact archived payload can
+# exercise MEX loading again in clean compatibility containers.
+qualification_dir="$destination/share/featool/qualification"
+mkdir -p "$qualification_dir"
+cp "$probe_dir/octave_runtime_mex_probe.mex" \
+  "$qualification_dir/octave_runtime_mex_probe.mex"
+
 # Keep interpreter runtime content and remove development/documentation surfaces.
 rm -rf \
   "$destination/include" \
@@ -331,7 +338,7 @@ runtime_prepare_args=(
   --octave-source-prefix "$source_dir" \
   --forbidden-prefix "$source_dir" \
   --forbidden-prefix "$build_dir" \
-  --qualification-elf "$probe_dir/octave_runtime_mex_probe.mex"
+  --qualification-elf "$qualification_dir/octave_runtime_mex_probe.mex"
 )
 if [[ -n "$dependency_prefix" ]]; then
   runtime_prepare_args+=(--dependency-prefix "$dependency_prefix")
@@ -342,7 +349,7 @@ if [[ "$validate" -eq 1 ]]; then
   validation_home="$build_dir/validation-home"
   mkdir -p "$validation_home"
   runtime_launcher="$destination/bin/featool-octave"
-  octave_probe_dir="${probe_dir//\\//}"
+  octave_probe_dir="${qualification_dir//\\//}"
   octave_probe_dir="${octave_probe_dir//\'/\'\'}"
   eval_code="assert(strcmp(OCTAVE_VERSION,'11.3.0')); A=sparse([4 -1;-1 4]); b=[1;2]; x=A\\b; assert(norm(A*x-b)<1e-12); e=eigs(sparse(diag(1:5)),1); assert(abs(e-5)<1e-8); f=fft([1 2 3 4]); assert(numel(f)==4); p=[0 0;1 0;0 1;1 1]; k=convhull(p(:,1),p(:,2)); assert(numel(k)>=4); t=delaunay(p(:,1),p(:,2)); assert(rows(t)>=2); fn=[tempname() '.h5']; q=magic(3); save('-hdf5',fn,'q'); clear q; load(fn); assert(isequal(q,magic(3))); unlink(fn); fn=tempname(); fid=fopen(fn,'w'); fputs(fid,'curl-ok'); fclose(fid); txt=urlread(['file://' fn]); unlink(fn); assert(strcmp(strtrim(txt),'curl-ok')); assert(~isempty(jsonencode(struct('a',1)))); disp('LINUX_NUMERICAL_RUNTIME=pass');"
   env -i \
