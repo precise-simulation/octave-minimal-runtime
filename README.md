@@ -63,7 +63,8 @@ the production FEATool/PyRuntime integration remain later qualification steps.
 with BLAS/LAPACK, SuiteSparse, ARPACK, FFTW, HDF5, Qhull, libcurl, and MEX
 support available from the pinned build environment while disabling Java,
 documentation, Qt, FLTK, OpenGL, and ImageMagick integration. It installs into
-an isolated staging prefix, removes development-only payload, and creates a relative launcher that
+an isolated staging prefix, removes development-only payload, and creates a
+relative launcher that
 sets the packaged Octave home, supplies a deterministic child `PATH`, and
 disables Octave startup files without requiring a system Octave installation.
 
