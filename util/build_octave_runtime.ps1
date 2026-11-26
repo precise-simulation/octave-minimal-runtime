@@ -322,6 +322,12 @@ foreach ($Relative in @('share\octave\packages', 'lib\octave\packages')) {
     }
 }
 
+# post-install.bat regenerates this registry with the current UTC timestamp.
+# Its entries point to the bundled packages removed above, so retaining it is
+# both stale and a source of cross-run nondeterminism.
+$PackageRegistry = Join-Path $RuntimeMingw 'share\octave\site\api-v61\octave_packages'
+Remove-Item -LiteralPath $PackageRegistry -Force -ErrorAction SilentlyContinue
+
 Get-ChildItem -LiteralPath (Join-Path $RuntimeMingw 'lib\octave') -Recurse -File |
     Where-Object { $_.Extension -in @('.a', '.la') } |
     Remove-Item -Force
