@@ -75,6 +75,13 @@ jobs:
             throw "GNU Octave post-install script not found: $postInstall"
           }
 
+          $oldPath = $env:PATH
+          $systemRoot = $env:SystemRoot
+          $env:PATH = @(
+            (Join-Path $systemRoot 'System32'),
+            $systemRoot,
+            (Join-Path $systemRoot 'System32\Wbem')
+          ) -join ';'
           Push-Location $octaveRoot
           try {
             & $postInstall
@@ -83,6 +90,7 @@ jobs:
             }
           } finally {
             Pop-Location
+            $env:PATH = $oldPath
           }
 
           "OCTAVE_ROOT=$octaveRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
