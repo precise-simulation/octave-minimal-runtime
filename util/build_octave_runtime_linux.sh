@@ -117,10 +117,10 @@ printf '%s\n' "${configure_args[@]}" > "$build_dir/configure-args.txt"
 
 configure_flags="-O2 -g0 -fPIC"
 compile_flags="$configure_flags -ffile-prefix-map=$source_dir=/usr/src/octave-$OCTAVE_VERSION -ffile-prefix-map=$build_dir=/usr/src/octave-build"
-export CFLAGS="${CFLAGS:-$configure_flags}"
-export CXXFLAGS="${CXXFLAGS:-$configure_flags}"
-export FFLAGS="${FFLAGS:-$configure_flags}"
-export FCFLAGS="${FCFLAGS:-$configure_flags}"
+export CFLAGS="$configure_flags"
+export CXXFLAGS="$configure_flags"
+export FFLAGS="$configure_flags"
+export FCFLAGS="$configure_flags"
 export CPPFLAGS="${CPPFLAGS:-} -I/usr/include/hdf5/serial -I/usr/include/suitesparse"
 export LDFLAGS="${LDFLAGS:-} -L/usr/lib/x86_64-linux-gnu/hdf5/serial"
 export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1780272000}"
@@ -151,11 +151,7 @@ if [[ ! -w "$(dirname "$install_root")" ]]; then
   printf 'error: configured install prefix parent is not writable: %s\n' "$(dirname "$install_root")" >&2
   exit 1
 fi
-make install \
-  CFLAGS="$compile_flags" \
-  CXXFLAGS="$compile_flags" \
-  FFLAGS="$compile_flags" \
-  FCFLAGS="$compile_flags"
+make install
 popd >/dev/null
 
 if [[ ! -x "$install_root/bin/octave-cli" ]]; then
