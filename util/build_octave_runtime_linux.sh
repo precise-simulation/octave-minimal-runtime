@@ -106,6 +106,7 @@ configure_args=(
   "--disable-docs"
   "--disable-java"
   "--disable-static"
+  "--enable-relocate-all"
   "--enable-shared"
   "--without-qt"
   "--without-fltk"
@@ -235,7 +236,7 @@ if [[ "$validate" -eq 1 ]]; then
     PATH="/usr/bin:/bin" \
     LANG="C.UTF-8" \
     LC_ALL="C.UTF-8" \
-    "$runtime_launcher" --quiet --no-init-all --eval "$eval_code"
+    "$runtime_launcher" --quiet --eval "$eval_code"
 
   mex_eval="addpath('$octave_probe_dir'); y=octave_runtime_mex_probe(41); assert(y==42); disp('LINUX_MEX_RUNTIME=pass');"
   env -i \
@@ -243,7 +244,7 @@ if [[ "$validate" -eq 1 ]]; then
     PATH="/usr/bin:/bin" \
     LANG="C.UTF-8" \
     LC_ALL="C.UTF-8" \
-    "$runtime_launcher" --quiet --no-init-all --eval "$mex_eval"
+    "$runtime_launcher" --quiet --eval "$mex_eval"
 
   python3 "$runtime_tool" verify \
     --runtime-root "$destination" \

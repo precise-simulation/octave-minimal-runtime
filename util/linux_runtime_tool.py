@@ -594,6 +594,10 @@ def run_smoke(root: Path) -> None:
     if not launcher.is_file():
         raise RuntimeErrorWithContext(f"runtime launcher is missing: {launcher}")
     with tempfile.TemporaryDirectory(prefix="featool-octave-smoke-") as home:
+        Path(home, ".octaverc").write_text(
+            "error('ambient user startup file was loaded');\\n",
+            encoding="utf-8",
+        )
         env = {
             "HOME": home,
             "PATH": "/usr/bin:/bin",
@@ -609,7 +613,6 @@ def run_smoke(root: Path) -> None:
             [
                 str(launcher),
                 "--quiet",
-                "--no-init-all",
                 "--eval",
                 expression,
             ],
