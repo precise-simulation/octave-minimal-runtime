@@ -54,6 +54,13 @@ the official `octave-11.3.0-w64.7z`, verifies the pinned SHA-256 digest, runs
 the archive's `post-install.bat`, generates the runtime, verifies the manifest,
 archives the exact generated tree, and uploads it as a workflow artifact.
 
+The hosted workflow also supports an explicit `qualify_featool` dispatch gate.
+That gate consumes a SHA-256-pinned FEATool qualification ZIP from repository
+configuration, optionally authenticates with a secret Bearer token, and requires
+the production-composed PyRuntime below `featool/bin/pyrt/win-x64`. It runs the
+FEATool numerical, MEX, embedded Python, and Tk probes with strict process
+isolation.
+
 FEATool and PyRuntime are not assumed to be public GitHub repositories. Hosted
 qualification must therefore use explicit authenticated source or artifact
 inputs before it becomes a required acceptance gate. Building the standalone
@@ -106,8 +113,10 @@ unsafe source/destination nesting, and writes a per-file SHA-256
 `runtime-manifest.json`.
 
 Validation with `-Validate` removes installed GNU Octave paths from `PATH` and
-sets `OCTAVE_HOME` and `OCTAVE_EXEC_HOME` to the generated runtime. Missing files
-therefore cannot silently fall back to the development Octave installation.
+sets `OCTAVE_HOME` and `OCTAVE_EXEC_HOME` to the generated runtime. With
+`-StrictIsolation`, validation permits only the generated runtime and Windows
+system directories on `PATH` and clears ambient Python, Tcl/Tk, PyRuntime source,
+and bridge-backend environment overrides.
 
 A representative local validation command is:
 
@@ -119,7 +128,10 @@ current development PyRuntime layout, add:
 `-PyRuntimeSource C:\Users\jsh\Dropbox\code\featool\pyruntime`
 
 This runs the same isolated Octave qualification plus FEATool `pyengine` probes
-both without GUI initialization and with the hidden Tk root enabled.
+both without GUI initialization and with the hidden Tk root enabled. Production
+qualification uses `-ValidatePackagedPyRuntime`: it requires the composed runtime
+below `featool/bin/pyrt/win-x64`, rejects `-PyRuntimeSource`, and verifies that
+FEATool selected that exact packaged runtime before the Python/Tk probes.
 
 ## Runtime checkpoint
 
@@ -137,9 +149,24 @@ With the full Octave installation removed from `PATH`, a live FEATool solve used
 55 modules from the generated runtime and zero modules from the full Octave
 installation.
 
+The measurements above are the historical installed-Octave checkpoint. The
+canonical GitHub-hosted build from the pinned official archive is smaller.
+Hosted run `45767968400` at commit `cc69f3f` passed on `windows-2025` with:
+
+- headless payload: 1,590 files, 100,792,709 bytes (about 96.1 MiB), manifest
+  SHA-256
+  `A68384AB108203DEE93268A87E0C99016195A1B95B86153546C19F07161B6785`;
+- Qt payload: 1,637 files, 182,080,545 bytes (about 173.6 MiB), manifest
+  SHA-256
+  `DAC1479E6531FD5179E1B991EB16858450A415CF3502B7FF421714489C405AAD`;
+- headless numerical probe with a minimal runtime/system `PATH`: pass;
+- repeat-build manifest identity for both profiles: pass;
+- archive test, extraction, complete file-set/size/SHA-256 verification: pass;
+- GitHub artifact publication for both profiles: pass.
+
 ## Optional Qt graphics profile
 
-The default runtime remains the 125.1 MiB headless profile. For FEATool workflows
+The canonical hosted default is the 96.1 MiB headless profile. For FEATool workflows
 that need native Octave figures, `plot`, or `waitbar`, the builder supports an
 optional `-GraphicsSupport` switch.
 
@@ -363,8 +390,8 @@ Two distribution surfaces can use this same payload:
   technology.
 
 For the installer, make native Octave Qt graphics an optional component. The
-base install then carries the 125.1 MiB headless Octave runtime; selecting the
-graphics component adds approximately 77.5 MiB and enables the 202.6 MiB Qt
+base install then carries the 96.1 MiB hosted headless Octave runtime; selecting the
+graphics component adds approximately 77.5 MiB and enables the 173.6 MiB hosted Qt
 profile. External geometry, meshing, and solver helpers remain separate FEATool
 application assets under `helpers/` and should not be folded into the Octave
 interpreter runtime merely for installer convenience.
@@ -376,36 +403,32 @@ not as an installer-only afterthought.
 
 ## Remaining work
 
-Runtime feasibility and local qualification are established. Work in this
-repository is now release automation and composition. The first CI milestone is
-a deterministic hosted Windows build of the standalone Octave payload. The exact
-production-composed PyRuntime artifact is not currently present at the expected
-local build output, so the validated development layout still depends on the
-sibling Python source checkout.
+Runtime feasibility, focused FEATool qualification, and the deterministic
+GitHub-hosted Windows build of the standalone Octave payload are established.
+The repository also defines the authenticated hosted FEATool/package
+qualification gate, but no immutable production qualification bundle is
+configured in GitHub yet.
 
 A production FEATool package must:
 
-1. run the standalone Octave runtime build on GitHub-hosted Windows and retain
-   the generated archives and checksums as CI artifacts;
-2. connect an authenticated FEATool source input to hosted qualification and
-   run the solver/assembly/MEX acceptance checks against the exact runtime;
-3. connect the production PyRuntime source/artifact and run the embedded
-   Python/Tk qualification;
-4. compose the required `pyruntime` Python modules into the release PyRuntime;
-5. package required external FEATool geometry/mesh/solver helpers independently;
-6. assemble the application-private relocatable release tree and launcher;
-7. wrap the same release tree as a portable archive and/or Windows installer,
-   with Qt graphics as an optional component rather than a base requirement;
-8. rerun the full isolated builder validation against the exact production bytes;
-9. verify there is no ambient Octave, Python, Tcl, or Tk fallback after
-   relocation and when launched through the production launcher;
-10. define and satisfy GNU Octave GPL license and corresponding-source
+1. publish an immutable FEATool qualification bundle and configure its URL and
+   SHA-256 for the hosted qualification gate;
+2. include the production-composed PyRuntime in that bundle and pass the
+   embedded Python/Tk probes under strict isolation;
+3. package required external FEATool geometry/mesh/solver helpers independently;
+4. assemble and qualify the application-private relocatable release tree and
+   launcher;
+5. wrap the same qualified tree as a portable archive and/or Windows installer,
+   with Qt graphics optional rather than a base requirement;
+6. verify no ambient Octave, Python, Tcl, or Tk fallback after relocation and
+   through the production launcher;
+7. define and satisfy GNU Octave GPL license and corresponding-source
    distribution obligations for the shipped artifact.
 
 If the release requires plot-file export, separately qualify `print` for the
 required PNG/PDF/SVG formats and stage only the additional export dependencies
 that the resulting trace demonstrates. Visible Qt plots and FEATool waitbars are
-qualified; plot-file export is still outside the current acceptance scope.
+qualified; plot-file export remains outside the current acceptance scope.
 
 ## Acceptance criteria
 
@@ -437,9 +460,12 @@ The stripped Octave runtime is acceptable when:
 - redistribution includes the required GNU Octave license and corresponding
   source compliance material.
 
-The current checkpoint is a deterministic 125.1 MiB headless Octave payload
-with focused FEATool numerical, MEX, embedded CPython, and Tk qualification
-passing, plus an optional 202.6 MiB Qt profile with representative production
-FEATool plotting and waitbar paths passing. Exact production PyRuntime
-composition, hosted FEATool qualification, and final package qualification
-remain pending.
+The current checkpoint is a deterministic GitHub-hosted 96.1 MiB headless
+Octave payload and 173.6 MiB Qt payload with reproducible manifests and verified
+archives. Focused FEATool numerical, MEX, embedded CPython, Tk, plotting, and
+waitbar qualification has passed against development inputs. Production
+PyRuntime selection and strict isolation are represented in the builder, and
+the authenticated hosted qualification gate is defined. Publishing the immutable
+production FEATool/PyRuntime bundle, final application assembly/launcher
+qualification, helper packaging, and corresponding-source compliance remain
+external release-input tasks.

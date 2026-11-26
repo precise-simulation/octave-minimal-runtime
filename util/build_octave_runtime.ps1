@@ -4,6 +4,8 @@ param(
     [string]$Destination = (Join-Path $env:TEMP 'featool-octave-runtime'),
     [string]$FeatoolRoot = '',
     [string]$PyRuntimeSource = '',
+    [switch]$ValidatePackagedPyRuntime,
+    [switch]$StrictIsolation,
     [switch]$GraphicsSupport,
     [switch]$Validate
 )
@@ -197,11 +199,36 @@ if ($PyRuntimeSource) {
     }
 }
 
+if ($ValidatePackagedPyRuntime) {
+    if (-not $Validate) {
+        throw "ValidatePackagedPyRuntime is only used with -Validate"
+    }
+    if ($PyRuntimeSource) {
+        throw "ValidatePackagedPyRuntime cannot be combined with PyRuntimeSource"
+    }
+}
+
+if ($StrictIsolation -and -not $Validate) {
+    throw "StrictIsolation is only used with -Validate"
+}
+
 if (-not (Test-Path -LiteralPath $SourceOctave -PathType Leaf)) {
     throw "GNU Octave CLI not found: $SourceOctave"
 }
 if ($Validate -and -not (Test-Path -LiteralPath (Join-Path $FeatoolRoot 'featool') -PathType Container)) {
     throw "FEATool source directory not found under FeatoolRoot: $FeatoolRoot"
+}
+if ($ValidatePackagedPyRuntime) {
+    $PackagedPyRuntime = Join-Path $FeatoolRoot 'featool\bin\pyrt\win-x64'
+    foreach ($RequiredPackagedPath in @(
+        'manifest.json',
+        'bridge.mex'
+    )) {
+        $Candidate = Join-Path $PackagedPyRuntime $RequiredPackagedPath
+        if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) {
+            throw "Packaged PyRuntime component is missing: $Candidate"
+        }
+    }
 }
 if ($Destination -eq [IO.Path]::GetPathRoot($Destination)) {
     throw "Refusing to use a filesystem root as Destination: $Destination"
@@ -348,6 +375,20 @@ $OldOctaveHome = $env:OCTAVE_HOME
 $OldOctaveExecHome = $env:OCTAVE_EXEC_HOME
 $OldOctavePath = $env:OCTAVE_PATH
 $OldPyRuntimeSource = $env:FEATOOL_PYRUNTIME_SOURCE
+$IsolationEnvironmentNames = @(
+    'PYTHONHOME',
+    'PYTHONPATH',
+    'TCL_LIBRARY',
+    'TK_LIBRARY',
+    'MEX_BRIDGE_BACKEND_PATH',
+    'MEX_BRIDGE_BACKEND_MODULE',
+    'MEX_BRIDGE_BACKEND_ENTRY',
+    'MEX_BRIDGE_CALLBACK_ALLOWLIST'
+)
+$OldIsolationEnvironment = @{}
+foreach ($Name in $IsolationEnvironmentNames) {
+    $OldIsolationEnvironment[$Name] = [Environment]::GetEnvironmentVariable($Name, 'Process')
+}
 $ProbeDir = Join-Path $env:TEMP ('featool-octave-runtime-probe-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $ProbeDir -Force | Out-Null
 
@@ -371,7 +412,24 @@ try {
         }
     }
     $CleanPath = $CleanPathEntries -join ';'
-    $env:PATH = "$RuntimeBin;$CleanPath"
+    if ($StrictIsolation) {
+        $SystemRoot = [Environment]::GetEnvironmentVariable('SystemRoot', 'Process')
+        if (-not $SystemRoot) {
+            throw 'SystemRoot is unavailable for strict runtime isolation'
+        }
+        $SystemPath = @(
+            (Join-Path $SystemRoot 'System32'),
+            $SystemRoot,
+            (Join-Path $SystemRoot 'System32\Wbem')
+        ) -join ';'
+        $env:PATH = "$RuntimeBin;$SystemPath"
+        foreach ($Name in $IsolationEnvironmentNames) {
+            [Environment]::SetEnvironmentVariable($Name, $null, 'Process')
+        }
+        Remove-Item Env:FEATOOL_PYRUNTIME_SOURCE -ErrorAction SilentlyContinue
+    } else {
+        $env:PATH = "$RuntimeBin;$CleanPath"
+    }
     $env:OCTAVE_HOME = $RuntimeMingw
     $env:OCTAVE_EXEC_HOME = $RuntimeMingw
     Remove-Item Env:OCTAVE_PATH -ErrorAction SilentlyContinue
@@ -484,10 +542,18 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[]) {
         '--quiet', '--no-init-all', '--no-window-system', '--eval', $MexEval
     ) 'Octave MEX runtime probe'
 
-    if ($PyRuntimeSource) {
-        $env:FEATOOL_PYRUNTIME_SOURCE = $PyRuntimeSource
+    if ($PyRuntimeSource -or $ValidatePackagedPyRuntime) {
+        if ($PyRuntimeSource) {
+            $env:FEATOOL_PYRUNTIME_SOURCE = $PyRuntimeSource
+        } else {
+            Remove-Item Env:FEATOOL_PYRUNTIME_SOURCE -ErrorAction SilentlyContinue
+        }
         $FeatoolForOctave = (Join-Path $FeatoolRoot 'featool').Replace('\', '/').Replace("'", "''")
         $BridgeSetup = "root='$FeatoolForOctave'; addpath(root,fullfile(root,'app'),fullfile(root,'core'),fullfile(root,'ellib'),fullfile(root,'grid'),fullfile(root,'gui'),fullfile(root,'physmodes'),fullfile(root,'python'),fullfile(root,'post'),fullfile(root,'util')); app_config('python',1);"
+        if ($ValidatePackagedPyRuntime) {
+            $ExpectedRuntimeForOctave = $PackagedPyRuntime.Replace('\', '/').Replace("'", "''")
+            $BridgeSetup += " info=pyengine('runtime'); assert(info.available); assert(strcmpi(strrep(info.path,'\','/'),'$ExpectedRuntimeForOctave'));"
+        }
 
         Invoke-CheckedOctave $RuntimeOctave @(
             '--quiet', '--no-init-all', '--no-window-system', '--eval',
@@ -502,6 +568,12 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[]) {
 
     Write-Output 'validation=pass'
     Write-Output "validation_octave_path_entries_removed=$RemovedPathEntries"
+    Write-Output ("validation_path_mode=" + $(if ($StrictIsolation) { 'strict' } else { 'ambient-non-octave' }))
+    if ($ValidatePackagedPyRuntime) {
+        Write-Output 'validation_pyruntime=packaged'
+    } elseif ($PyRuntimeSource) {
+        Write-Output 'validation_pyruntime=source-override'
+    }
 } finally {
     $env:PATH = $OldPath
     if ($null -eq $OldOctaveHome) {
@@ -523,6 +595,9 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[]) {
         Remove-Item Env:FEATOOL_PYRUNTIME_SOURCE -ErrorAction SilentlyContinue
     } else {
         $env:FEATOOL_PYRUNTIME_SOURCE = $OldPyRuntimeSource
+    }
+    foreach ($Name in $IsolationEnvironmentNames) {
+        [Environment]::SetEnvironmentVariable($Name, $OldIsolationEnvironment[$Name], 'Process')
     }
     Remove-Item -LiteralPath $ProbeDir -Recurse -Force -ErrorAction SilentlyContinue
 }
