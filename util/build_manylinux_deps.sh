@@ -210,6 +210,7 @@ cmake_build_install() {
     -DCMAKE_INSTALL_PREFIX="$prefix"
     -DCMAKE_INSTALL_LIBDIR=lib
     -DCMAKE_PREFIX_PATH="$prefix"
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5
     -DCMAKE_SKIP_INSTALL_RPATH=ON
     "$@"
   )

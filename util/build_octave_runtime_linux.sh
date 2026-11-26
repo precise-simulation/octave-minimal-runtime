@@ -303,6 +303,18 @@ export OCTAVE_HOME="$runtime_root"
 export OCTAVE_EXEC_HOME="$runtime_root"
 export PATH="$runtime_root/bin:/usr/bin:/bin"
 unset OCTAVE_PATH OCTAVE_SITE_INITFILE OCTAVE_VERSION_INITFILE LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT
+if [ -z "${CURLOPT_CAINFO:-}" ] && [ -z "${CURLOPT_CAPATH:-}" ]; then
+  for candidate in \
+    /etc/ssl/certs/ca-certificates.crt \
+    /etc/pki/tls/certs/ca-bundle.crt \
+    /etc/ssl/ca-bundle.pem
+  do
+    if [ -r "$candidate" ]; then
+      export CURLOPT_CAINFO="$candidate"
+      break
+    fi
+  done
+fi
 exec "$runtime_root/bin/octave-cli" --no-window-system --no-init-all "$@"
 EOF
 chmod 0755 "$destination/bin/featool-octave"
@@ -347,6 +359,116 @@ if [[ "$validate" -eq 1 ]]; then
     LANG="C" \
     LC_ALL="C" \
     "$runtime_launcher" --quiet --eval "$mex_eval"
+
+  tls_probe_dir="$build_dir/tls-probe"
+  mkdir -p "$tls_probe_dir"
+  openssl_command="$dependency_prefix/bin/openssl"
+  if [[ -z "$dependency_prefix" ]] || [[ ! -x "$openssl_command" ]]; then
+    printf 'error: HTTPS validation requires the private OpenSSL command\n' >&2
+    exit 1
+  fi
+  openssl_env="$dependency_prefix/lib:$dependency_prefix/lib64:${LD_LIBRARY_PATH:-}"
+  cat > "$tls_probe_dir/openssl.cnf" <<'EOF'
+[req]
+distinguished_name=req_dn
+prompt=no
+
+[req_dn]
+CN=placeholder
+EOF
+  env LD_LIBRARY_PATH="$openssl_env" "$openssl_command" req \
+    -x509 -newkey rsa:2048 -nodes \
+    -config "$tls_probe_dir/openssl.cnf" \
+    -keyout "$tls_probe_dir/ca.key" \
+    -out "$tls_probe_dir/ca.crt" \
+    -subj '/CN=FEATool Runtime Test CA' \
+    -days 1
+  env LD_LIBRARY_PATH="$openssl_env" "$openssl_command" req \
+    -newkey rsa:2048 -nodes \
+    -config "$tls_probe_dir/openssl.cnf" \
+    -keyout "$tls_probe_dir/server.key" \
+    -out "$tls_probe_dir/server.csr" \
+    -subj '/CN=localhost'
+  cat > "$tls_probe_dir/server.ext" <<'EOF'
+subjectAltName=DNS:localhost,IP:127.0.0.1
+extendedKeyUsage=serverAuth
+EOF
+  env LD_LIBRARY_PATH="$openssl_env" "$openssl_command" x509 \
+    -req \
+    -in "$tls_probe_dir/server.csr" \
+    -CA "$tls_probe_dir/ca.crt" \
+    -CAkey "$tls_probe_dir/ca.key" \
+    -CAcreateserial \
+    -out "$tls_probe_dir/server.crt" \
+    -days 1 \
+    -extfile "$tls_probe_dir/server.ext"
+
+  cat > "$tls_probe_dir/https_server.py" <<'PY'
+import http.server
+from pathlib import Path
+import ssl
+import sys
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b"https-ok\n"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+
+certificate, private_key, port_file = sys.argv[1:4]
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain(certificate, private_key)
+server.socket = context.wrap_socket(server.socket, server_side=True)
+Path(port_file).write_text(str(server.server_address[1]), encoding="ascii")
+server.serve_forever()
+PY
+
+  "$python_command" "$tls_probe_dir/https_server.py" \
+    "$tls_probe_dir/server.crt" \
+    "$tls_probe_dir/server.key" \
+    "$tls_probe_dir/port" \
+    > "$tls_probe_dir/server.log" 2>&1 &
+  tls_server_pid=$!
+  cleanup_tls_server() {
+    kill "$tls_server_pid" >/dev/null 2>&1 || true
+    wait "$tls_server_pid" >/dev/null 2>&1 || true
+  }
+  trap cleanup_tls_server EXIT
+  for _ in $(seq 1 100); do
+    if [[ -s "$tls_probe_dir/port" ]]; then
+      break
+    fi
+    if ! kill -0 "$tls_server_pid" >/dev/null 2>&1; then
+      cat "$tls_probe_dir/server.log" >&2 || true
+      printf 'error: local HTTPS validation server exited early\n' >&2
+      exit 1
+    fi
+    sleep 0.1
+  done
+  if [[ ! -s "$tls_probe_dir/port" ]]; then
+    printf 'error: local HTTPS validation server did not publish a port\n' >&2
+    exit 1
+  fi
+  tls_port="$(cat "$tls_probe_dir/port")"
+  https_eval="txt=urlread('https://localhost:$tls_port/'); assert(strcmp(strtrim(txt),'https-ok')); disp('LINUX_HTTPS_RUNTIME=pass');"
+  env -i \
+    HOME="$validation_home" \
+    PATH="/usr/bin:/bin" \
+    LANG="C" \
+    LC_ALL="C" \
+    CURLOPT_CAINFO="$tls_probe_dir/ca.crt" \
+    "$runtime_launcher" --quiet --eval "$https_eval"
+  cleanup_tls_server
+  trap - EXIT
 
   "$python_command" "$runtime_tool" verify \
     --runtime-root "$destination" \
