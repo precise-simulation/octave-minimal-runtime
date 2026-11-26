@@ -1,0 +1,401 @@
+name: Build Windows runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      qualify_featool:
+        description: Run authenticated FEATool + packaged PyRuntime qualification
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches:
+      - main
+      - 'feat/**'
+    paths:
+      - .github/workflows/build-windows-runtime.yml
+      - util/build_octave_runtime.ps1
+      - util/verify_octave_runtime.ps1
+      - plans/in-progress/stripped-octave-runtime-featool.md
+  pull_request:
+    paths:
+      - .github/workflows/build-windows-runtime.yml
+      - util/build_octave_runtime.ps1
+      - util/verify_octave_runtime.ps1
+
+permissions:
+  contents: read
+
+env:
+  OCTAVE_VERSION: 11.3.0
+  OCTAVE_ARCHIVE: octave-11.3.0-w64.7z
+  OCTAVE_URL: https://github.com/gnu-octave/octave/releases/download/release-11-3-0/octave-11.3.0-w64.7z
+  OCTAVE_SHA256: fd3cf0e885467a15211b8ceded42800432a5462481324d49a896ef257e05d1a0
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out runtime builder
+        uses: actions/checkout@v7
+
+      - name: Download and verify GNU Octave
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP $env:OCTAVE_ARCHIVE
+          Invoke-WebRequest -Uri $env:OCTAVE_URL -OutFile $archive
+
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $env:OCTAVE_SHA256) {
+            throw "GNU Octave archive SHA-256 mismatch: expected $env:OCTAVE_SHA256, got $actual"
+          }
+          Write-Host "Verified $env:OCTAVE_ARCHIVE ($actual)"
+
+      - name: Extract and initialize GNU Octave
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP $env:OCTAVE_ARCHIVE
+          $extract = Join-Path $env:RUNNER_TEMP 'octave-source'
+          New-Item -ItemType Directory -Path $extract -Force | Out-Null
+
+          & 7z x $archive "-o$extract" -y
+          if ($LASTEXITCODE -ne 0) {
+            throw "7-Zip extraction failed with exit code $LASTEXITCODE"
+          }
+
+          $cli = Get-ChildItem -LiteralPath $extract -Recurse -Filter octave-cli.exe -File |
+            Where-Object { $_.FullName -match '\\mingw64\\bin\\octave-cli\.exe$' } |
+            Select-Object -First 1
+          if (-not $cli) {
+            throw 'Could not locate mingw64\bin\octave-cli.exe in the extracted archive'
+          }
+
+          $mingw = Split-Path -Parent (Split-Path -Parent $cli.FullName)
+          $octaveRoot = Split-Path -Parent $mingw
+          $postInstall = Join-Path $octaveRoot 'post-install.bat'
+          if (-not (Test-Path -LiteralPath $postInstall -PathType Leaf)) {
+            throw "GNU Octave post-install script not found: $postInstall"
+          }
+
+          $oldPath = $env:PATH
+          $systemRoot = $env:SystemRoot
+          $env:PATH = @(
+            (Join-Path $systemRoot 'System32'),
+            $systemRoot,
+            (Join-Path $systemRoot 'System32\Wbem')
+          ) -join ';'
+          Push-Location $octaveRoot
+          try {
+            & $postInstall
+            if ($LASTEXITCODE -ne 0) {
+              throw "GNU Octave post-install failed with exit code $LASTEXITCODE"
+            }
+          } finally {
+            Pop-Location
+            $env:PATH = $oldPath
+          }
+
+          "OCTAVE_ROOT=$octaveRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "GNU Octave root: $octaveRoot"
+
+      - name: Build headless runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $destination = Join-Path $env:RUNNER_TEMP 'featool-octave-headless'
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\util\build_octave_runtime.ps1 `
+            -OctaveRoot $env:OCTAVE_ROOT `
+            -Destination $destination
+          if ($LASTEXITCODE -ne 0) {
+            throw "Headless runtime build failed with exit code $LASTEXITCODE"
+          }
+          "HEADLESS_RUNTIME=$destination" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify headless runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\util\verify_octave_runtime.ps1 `
+            -RuntimeRoot $env:HEADLESS_RUNTIME `
+            -ExpectedProfile 'headless-cli-featool'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Headless runtime manifest verification failed with exit code $LASTEXITCODE"
+          }
+          $mingw = Join-Path $env:HEADLESS_RUNTIME 'mingw64'
+          $bin = Join-Path $mingw 'bin'
+          $oldPath = $env:PATH
+          try {
+            $systemRoot = $env:SystemRoot
+            $systemPath = @(
+              (Join-Path $systemRoot 'System32'),
+              $systemRoot,
+              (Join-Path $systemRoot 'System32\Wbem')
+            ) -join ';'
+            $env:PATH = "$bin;$systemPath"
+            $env:OCTAVE_HOME = $mingw
+            $env:OCTAVE_EXEC_HOME = $mingw
+            Remove-Item Env:OCTAVE_PATH -ErrorAction SilentlyContinue
+            $octave = Join-Path $bin 'octave-cli.exe'
+            & $octave --quiet --no-init-all --no-window-system --eval "assert(strcmp(OCTAVE_VERSION,'11.3.0')); A=sparse([4 -1;-1 4]); b=[1;2]; x=A\b; assert(norm(A*x-b)<1e-12); disp('CI_HEADLESS_RUNTIME=pass')"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Generated headless runtime probe failed with exit code $LASTEXITCODE"
+            }
+          } finally {
+            $env:PATH = $oldPath
+          }
+
+      - name: Build Qt graphics runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $destination = Join-Path $env:RUNNER_TEMP 'featool-octave-qt'
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\util\build_octave_runtime.ps1 `
+            -OctaveRoot $env:OCTAVE_ROOT `
+            -Destination $destination `
+            -GraphicsSupport
+          if ($LASTEXITCODE -ne 0) {
+            throw "Qt runtime build failed with exit code $LASTEXITCODE"
+          }
+          "QT_RUNTIME=$destination" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify Qt runtime manifest
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\util\verify_octave_runtime.ps1 `
+            -RuntimeRoot $env:QT_RUNTIME `
+            -ExpectedProfile 'featool-qt-graphics'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Qt runtime manifest verification failed with exit code $LASTEXITCODE"
+          }
+
+          foreach ($required in @(
+            'mingw64\bin\octave.exe',
+            'mingw64\bin\qt.conf',
+            'mingw64\qt6\plugins\platforms'
+          )) {
+            $path = Join-Path $env:QT_RUNTIME $required
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "Qt runtime component is missing: $required"
+            }
+          }
+
+      - name: Verify reproducible runtime builds
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $profiles = @(
+            @{ Name = 'headless'; Source = $env:HEADLESS_RUNTIME; Profile = 'headless-cli-featool'; Graphics = $false },
+            @{ Name = 'qt'; Source = $env:QT_RUNTIME; Profile = 'featool-qt-graphics'; Graphics = $true }
+          )
+
+          foreach ($profile in $profiles) {
+            $repeat = Join-Path $env:RUNNER_TEMP ("featool-octave-repeat-" + $profile.Name)
+            $arguments = @(
+              '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '.\util\build_octave_runtime.ps1',
+              '-OctaveRoot', $env:OCTAVE_ROOT,
+              '-Destination', $repeat
+            )
+            if ($profile.Graphics) { $arguments += '-GraphicsSupport' }
+            & powershell.exe @arguments
+            if ($LASTEXITCODE -ne 0) {
+              throw "Repeat $($profile.Name) build failed with exit code $LASTEXITCODE"
+            }
+
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\util\verify_octave_runtime.ps1 `
+              -RuntimeRoot $repeat `
+              -ExpectedProfile $profile.Profile
+            if ($LASTEXITCODE -ne 0) {
+              throw "Repeat $($profile.Name) runtime verification failed with exit code $LASTEXITCODE"
+            }
+
+            $firstManifest = Join-Path $profile.Source 'runtime-manifest.json'
+            $repeatManifest = Join-Path $repeat 'runtime-manifest.json'
+            $firstHash = (Get-FileHash -LiteralPath $firstManifest -Algorithm SHA256).Hash
+            $repeatHash = (Get-FileHash -LiteralPath $repeatManifest -Algorithm SHA256).Hash
+            if ($firstHash -ne $repeatHash) {
+              throw "The $($profile.Name) runtime manifest changed between clean builds: $firstHash != $repeatHash"
+            }
+            Write-Host "$($profile.Name) reproducible manifest SHA-256: $firstHash"
+          }
+
+      - name: Create runtime archives
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $output = Join-Path $env:GITHUB_WORKSPACE 'artifacts'
+          New-Item -ItemType Directory -Path $output -Force | Out-Null
+
+          $archives = @(
+            @{ Name = 'featool-octave-runtime-win-x64'; Source = $env:HEADLESS_RUNTIME },
+            @{ Name = 'featool-octave-runtime-win-x64-qt'; Source = $env:QT_RUNTIME }
+          )
+
+          foreach ($item in $archives) {
+            $archive = Join-Path $output ($item.Name + '.7z')
+            Push-Location $item.Source
+            try {
+              & 7z a -t7z $archive '.\*' -mx=9 -mtm=off -mtc=off -mta=off
+              if ($LASTEXITCODE -ne 0) {
+                throw "Could not create $archive"
+              }
+            } finally {
+              Pop-Location
+            }
+            $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+            $profile = if ($item.Name.EndsWith('-qt')) { 'featool-qt-graphics' } else { 'headless-cli-featool' }
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\util\verify_octave_runtime.ps1 `
+              -RuntimeRoot $item.Source `
+              -ExpectedProfile $profile `
+              -ArchivePath $archive
+            if ($LASTEXITCODE -ne 0) {
+              throw "Archive verification failed for $archive with exit code $LASTEXITCODE"
+            }
+            "$hash  $([IO.Path]::GetFileName($archive))" |
+              Set-Content -LiteralPath ($archive + '.sha256') -Encoding ascii
+          }
+
+      - name: Upload headless runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: featool-octave-runtime-win-x64
+          path: |
+            artifacts/featool-octave-runtime-win-x64.7z
+            artifacts/featool-octave-runtime-win-x64.7z.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Qt graphics runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: featool-octave-runtime-win-x64-qt
+          path: |
+            artifacts/featool-octave-runtime-win-x64-qt.7z
+            artifacts/featool-octave-runtime-win-x64-qt.7z.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  qualify:
+    if: github.event_name == 'workflow_dispatch' && inputs.qualify_featool
+    needs: build
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      FEATOOL_QUALIFICATION_URL: ${{ vars.FEATOOL_QUALIFICATION_URL }}
+      FEATOOL_QUALIFICATION_SHA256: ${{ vars.FEATOOL_QUALIFICATION_SHA256 }}
+      FEATOOL_QUALIFICATION_TOKEN: ${{ secrets.FEATOOL_QUALIFICATION_TOKEN }}
+
+    steps:
+      - name: Check out runtime builder
+        uses: actions/checkout@v7
+
+      - name: Require pinned FEATool qualification bundle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:FEATOOL_QUALIFICATION_URL) {
+            throw 'Repository variable FEATOOL_QUALIFICATION_URL is required'
+          }
+          if ($env:FEATOOL_QUALIFICATION_SHA256 -notmatch '^[0-9a-fA-F]{64}$') {
+            throw 'Repository variable FEATOOL_QUALIFICATION_SHA256 must be a SHA-256 digest'
+          }
+
+      - name: Download and verify FEATool qualification bundle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'featool-qualification.zip'
+          $headers = @{ Accept = 'application/octet-stream' }
+          if ($env:FEATOOL_QUALIFICATION_TOKEN) {
+            $headers.Authorization = "Bearer $env:FEATOOL_QUALIFICATION_TOKEN"
+          }
+          Invoke-WebRequest -Uri $env:FEATOOL_QUALIFICATION_URL -Headers $headers -OutFile $archive
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expected = $env:FEATOOL_QUALIFICATION_SHA256.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            throw "FEATool qualification bundle SHA-256 mismatch: expected $expected, got $actual"
+          }
+
+          $root = Join-Path $env:RUNNER_TEMP 'featool-qualification'
+          Expand-Archive -LiteralPath $archive -DestinationPath $root
+          foreach ($required in @(
+            'featool\featool.m',
+            'featool\bin\pyrt\win-x64\manifest.json',
+            'featool\bin\pyrt\win-x64\bridge.mex',
+            'test\test_smoke.m',
+            'test_runner.m'
+          )) {
+            if (-not (Test-Path -LiteralPath (Join-Path $root $required) -PathType Leaf)) {
+              throw "FEATool qualification bundle is missing $required"
+            }
+          }
+          "FEATOOL_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Download and verify GNU Octave
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP $env:OCTAVE_ARCHIVE
+          Invoke-WebRequest -Uri $env:OCTAVE_URL -OutFile $archive
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $env:OCTAVE_SHA256) {
+            throw "GNU Octave archive SHA-256 mismatch: expected $env:OCTAVE_SHA256, got $actual"
+          }
+
+      - name: Extract and initialize GNU Octave
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP $env:OCTAVE_ARCHIVE
+          $extract = Join-Path $env:RUNNER_TEMP 'octave-source'
+          New-Item -ItemType Directory -Path $extract -Force | Out-Null
+          & 7z x $archive "-o$extract" -y
+          if ($LASTEXITCODE -ne 0) { throw "7-Zip extraction failed with exit code $LASTEXITCODE" }
+          $cli = Get-ChildItem -LiteralPath $extract -Recurse -Filter octave-cli.exe -File |
+            Where-Object { $_.FullName -match '\\mingw64\\bin\\octave-cli\.exe$' } |
+            Select-Object -First 1
+          if (-not $cli) { throw 'Could not locate mingw64\bin\octave-cli.exe' }
+          $mingw = Split-Path -Parent (Split-Path -Parent $cli.FullName)
+          $octaveRoot = Split-Path -Parent $mingw
+          $postInstall = Join-Path $octaveRoot 'post-install.bat'
+          if (-not (Test-Path -LiteralPath $postInstall -PathType Leaf)) {
+            throw "GNU Octave post-install script not found: $postInstall"
+          }
+          $oldPath = $env:PATH
+          $systemRoot = $env:SystemRoot
+          $env:PATH = @(
+            (Join-Path $systemRoot 'System32'),
+            $systemRoot,
+            (Join-Path $systemRoot 'System32\Wbem')
+          ) -join ';'
+          Push-Location $octaveRoot
+          try {
+            & $postInstall
+            if ($LASTEXITCODE -ne 0) { throw "GNU Octave post-install failed with exit code $LASTEXITCODE" }
+          } finally {
+            Pop-Location
+            $env:PATH = $oldPath
+          }
+          "OCTAVE_ROOT=$octaveRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Qualify FEATool and packaged PyRuntime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $destination = Join-Path $env:RUNNER_TEMP 'featool-octave-qualified'
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\util\build_octave_runtime.ps1 `
+            -OctaveRoot $env:OCTAVE_ROOT `
+            -Destination $destination `
+            -FeatoolRoot $env:FEATOOL_ROOT `
+            -Validate `
+            -ValidatePackagedPyRuntime `
+            -StrictIsolation
+          if ($LASTEXITCODE -ne 0) {
+            throw "Hosted FEATool qualification failed with exit code $LASTEXITCODE"
+          }
