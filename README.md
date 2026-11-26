@@ -38,7 +38,7 @@ on `windows-2025`. It:
    against the embedded manifest;
 9. publishes `.7z` archives and SHA-256 files as workflow artifacts.
 
-Hosted run `45767968400` passed this complete path at commit `cc69f3f`.
+Hosted run `45769526390` passed this complete path at commit `d3e14c0`.
 Its reproducible manifest SHA-256 values were
 `A68384AB108203DEE93268A87E0C99016195A1B95B86153546C19F07161B6785`
 for headless and

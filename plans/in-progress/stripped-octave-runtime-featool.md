@@ -151,7 +151,7 @@ installation.
 
 The measurements above are the historical installed-Octave checkpoint. The
 canonical GitHub-hosted build from the pinned official archive is smaller.
-Hosted run `45767968400` at commit `cc69f3f` passed on `windows-2025` with:
+Hosted run `45769526390` at commit `d3e14c0` passed on `windows-2025` with:
 
 - headless payload: 1,590 files, 100,792,709 bytes (about 96.1 MiB), manifest
   SHA-256
