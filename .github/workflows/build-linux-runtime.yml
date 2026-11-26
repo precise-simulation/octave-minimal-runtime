@@ -20,6 +20,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -186,4 +187,40 @@ jobs:
             artifacts/linux-build-packages.txt
           if-no-files-found: error
           compression-level: 0
-          retention-days: 7
+          retention-days: 1
+
+      - name: Delete superseded Linux runtime artifacts
+        if: ${{ success() && github.event_name != 'pull_request' }}
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const artifactName = 'featool-octave-runtime-linux-x64';
+            const currentRunId = Number(context.runId);
+            const currentBranch = context.ref.replace(/^refs\/heads\//, '');
+            const artifacts = await github.paginate(
+              github.rest.actions.listArtifactsForRepo,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: artifactName,
+                per_page: 100,
+              },
+            );
+
+            const superseded = artifacts.filter(
+              (artifact) =>
+                artifact.workflow_run?.id !== currentRunId &&
+                artifact.workflow_run?.head_branch === currentBranch,
+            );
+
+            core.info(
+              `Deleting ${superseded.length} superseded ${artifactName} artifact(s) from ${currentBranch}`,
+            );
+            for (const artifact of superseded) {
+              core.info(`Deleting artifact ${artifact.id} from run ${artifact.workflow_run?.id ?? 'unknown'}`);
+              await github.rest.actions.deleteArtifact({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                artifact_id: artifact.id,
+              });
+            }
