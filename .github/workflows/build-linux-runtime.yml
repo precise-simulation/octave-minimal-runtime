@@ -77,7 +77,9 @@ jobs:
             "$MANYLINUX_IMAGE" \
             /bin/bash -lc '
               set -euxo pipefail
+              set +u
               source /opt/rh/devtoolset-10/enable
+              set -u
               glibc_version="$(getconf GNU_LIBC_VERSION)"
               glibc_version="${glibc_version#glibc }"
               gcc_version="$(gcc -dumpfullversion -dumpversion)"
