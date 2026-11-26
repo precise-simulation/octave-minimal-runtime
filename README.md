@@ -98,6 +98,15 @@ extracts it to a different absolute path, and reruns manifest, ELF, dependency,
 and relocation smoke checks on the extracted tree before uploading the archive
 and build evidence.
 
+Hosted run `45781365018` passed this complete Linux path at commit `95bbb4d`.
+The qualified headless payload contains 1,182 files and 102,752,311 bytes
+(about 98.0 MiB); its `tar.zst` is 25,847,102 bytes with SHA-256
+`c57caa5936362e238d820a57e7f89b17727183729900622d746182375c130988`.
+The runtime closure contains 61 bundled non-host dependency SONAMEs and the
+manifest records 259 installed `dpkg` package/version entries. Maximum required
+symbol versions are `GLIBC_2.35`, `GLIBCXX_3.4.30`, `CXXABI_1.3.9`, and
+`GCC_4.3.0`.
+
 ## Authenticated FEATool qualification
 
 Manual workflow dispatches can enable `qualify_featool`. The optional
