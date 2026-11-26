@@ -446,7 +446,7 @@ def os_release() -> dict[str, str]:
 
 def build_provenance() -> dict[str, object]:
     release = os_release()
-    return {
+    provenance: dict[str, object] = {
         "distribution": release.get("PRETTY_NAME", release.get("NAME", "")),
         "distribution_id": release.get("ID", ""),
         "distribution_version": release.get("VERSION_ID", ""),
@@ -457,6 +457,16 @@ def build_provenance() -> dict[str, object]:
         "gfortran": first_line(["gfortran", "--version"]),
         "binutils": first_line(["ld", "--version"]),
     }
+    if shutil.which("dpkg-query") is not None:
+        packages = run(
+            ["dpkg-query", "-W", "-f=${binary:Package}\t${Version}\n"],
+            check=False,
+        )
+        if packages.returncode == 0:
+            provenance["dpkg_packages"] = sorted(
+                line for line in packages.stdout.splitlines() if line.strip()
+            )
+    return provenance
 
 
 def read_configure_args(path: Path | None) -> list[str]:

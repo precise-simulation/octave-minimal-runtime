@@ -179,7 +179,14 @@ rm -rf \
   "$destination/share/man" \
   "$destination/share/applications" \
   "$destination/share/icons" \
-  "$destination/share/metainfo"
+  "$destination/share/metainfo" \
+  "$destination/share/octave/$OCTAVE_VERSION/doc" \
+  "$destination/share/octave/$OCTAVE_VERSION/etc/tests" \
+  "$destination/share/octave/$OCTAVE_VERSION/fonts" \
+  "$destination/share/octave/$OCTAVE_VERSION/locale"
+rm -f \
+  "$destination/share/octave/$OCTAVE_VERSION/etc/CITATION" \
+  "$destination/share/octave/$OCTAVE_VERSION/etc/NEWS"
 find "$destination" -type f \( -name '*.a' -o -name '*.la' \) -delete
 rm -rf "$destination/lib/pkgconfig" "$destination/lib/cmake"
 

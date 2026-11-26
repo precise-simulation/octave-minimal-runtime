@@ -56,12 +56,14 @@ checkpoint. It runs on `ubuntu-24.04` inside a digest-pinned Ubuntu 22.04
 container and builds GNU Octave 11.3.0 from the pinned source archive with
 SHA-256
 `2b80f3149b2de6d1f4f2fcb4fe6515a17eb363b52111bf57b90f37bf6f5e12e1`.
+The Ubuntu package repositories remain mutable; each run records the exact
+resolved `dpkg` package versions in the manifest and uploaded build evidence.
 The current checkpoint is intentionally headless: Qt/native Octave graphics and
 the production FEATool/PyRuntime integration remain later qualification steps.
 
 `util/build_octave_runtime_linux.sh` configures a shared-library Octave build
 with BLAS/LAPACK, SuiteSparse, ARPACK, FFTW, HDF5, Qhull, libcurl, and MEX
-support available from the pinned build environment while disabling Java,
+support from the declared hosted build dependencies while disabling Java,
 documentation, Qt, FLTK, OpenGL, and ImageMagick integration. It installs into
 an isolated staging prefix, removes development-only payload, and creates a
 relative launcher that
@@ -73,11 +75,13 @@ entries. Non-glibc dependencies are copied into `lib/runtime-deps`; Octave-owned
 libraries are exposed there through relative symlinks. Every packaged ELF object
 receives an `$ORIGIN`-relative search path. Verification rejects unresolved
 dependencies, non-relative RPATH/RUNPATH entries, external symlink targets,
-non-x86-64 ELF objects, and references to the source/build staging paths.
+non-x86-64 ELF objects, build/staging paths in ELF loader metadata, and
+build/staging paths in non-ELF runtime files.
 
 The Linux manifest records file types, modes, regular-file sizes/SHA-256 values,
-symlink targets, build/compiler provenance, the host-library allowlist, and the
-maximum required `GLIBC`, `GLIBCXX`, `CXXABI`, and `GCC` symbol versions. The
+symlink targets, build/compiler provenance, exact resolved `dpkg` package
+versions, the host-library allowlist, and the maximum required `GLIBC`,
+`GLIBCXX`, `CXXABI`, and `GCC` symbol versions. The
 first hosted lane uses glibc 2.35 as its selected build baseline; that is a
 checkpoint baseline rather than the final public compatibility claim. A later
 compatibility lane will test the preferred glibc 2.17 floor or narrow the claim

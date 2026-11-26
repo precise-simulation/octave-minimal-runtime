@@ -75,6 +75,7 @@ jobs:
             xz-utils \
             zlib1g-dev \
             zstd
+          dpkg-query -W -f='${binary:Package}\t${Version}\n' | LC_ALL=C sort > "$RUNNER_TEMP/linux-build-packages.txt"
           rm -rf /var/lib/apt/lists/*
 
       - name: Check out runtime builder
@@ -156,6 +157,8 @@ jobs:
             "$output/featool-octave-runtime-linux-x64.manifest.json"
           cp "$LINUX_BUILD_DIR/configure.out" \
             "$output/octave-11.3.0-linux-configure.txt"
+          cp "$RUNNER_TEMP/linux-build-packages.txt" \
+            "$output/linux-build-packages.txt"
 
           python3 ./util/linux_runtime_tool.py verify \
             --runtime-root "$LINUX_RUNTIME" \
@@ -176,6 +179,7 @@ jobs:
             artifacts/featool-octave-runtime-linux-x64.tar.zst.sha256
             artifacts/featool-octave-runtime-linux-x64.manifest.json
             artifacts/octave-11.3.0-linux-configure.txt
+            artifacts/linux-build-packages.txt
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
