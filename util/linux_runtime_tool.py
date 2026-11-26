@@ -26,18 +26,37 @@ DEPENDENCY_DIR = Path("lib/runtime-deps")
 
 # These libraries are supplied by the target glibc host.  Compiler runtimes and
 # numerical libraries are intentionally absent from this list and are bundled.
-HOST_LIBRARY_ALLOWLIST = (
+BASE_HOST_LIBRARY_ALLOWLIST = (
     "ld-linux-x86-64.so.2",
     "libBrokenLocale.so.1",
     "libanl.so.1",
     "libc.so.6",
     "libdl.so.2",
     "libm.so.6",
-    "libmvec.so.1",
     "libpthread.so.0",
     "libresolv.so.2",
     "librt.so.1",
     "libutil.so.1",
+)
+
+# Host glibc components that are not available at every supported baseline.
+HOST_LIBRARY_MIN_GLIBC = {
+    "libmvec.so.1": "2.22",
+}
+
+# manylinux2014/CentOS 7 system library locations.  Explicit --system-library-dir
+# values may extend this set for a controlled build image.
+DEFAULT_MANYLINUX_SYSTEM_LIBRARY_DIRS = (
+    Path("/lib64"),
+    Path("/usr/lib64"),
+)
+
+COMPILER_COMMANDS = ("gcc", "g++", "gfortran")
+COMPILER_RUNTIME_PREFIXES = (
+    "libstdc++.so.",
+    "libgcc_s.so.",
+    "libgfortran.so.",
+    "libquadmath.so.",
 )
 
 VERSION_RE = re.compile(r"\b(GLIBCXX|GLIBC|CXXABI|GCC)_([0-9]+(?:\.[0-9]+)*)\b")
@@ -193,6 +212,83 @@ def internal_library_map(root: Path) -> dict[str, Path]:
     return result
 
 
+def host_library_allowlist(baseline: str) -> tuple[str, ...]:
+    allowed = list(BASE_HOST_LIBRARY_ALLOWLIST)
+    for soname, minimum in HOST_LIBRARY_MIN_GLIBC.items():
+        if version_key(minimum) <= version_key(baseline):
+            allowed.append(soname)
+    return tuple(sorted(allowed))
+
+
+def dependency_prefix_library_dirs(prefixes: Iterable[Path]) -> list[Path]:
+    result: list[Path] = []
+    seen: set[Path] = set()
+    for prefix in prefixes:
+        resolved = prefix.resolve()
+        if not resolved.is_dir():
+            raise RuntimeErrorWithContext(f"dependency prefix is missing: {resolved}")
+        for relative in ("lib", "lib64"):
+            candidate = resolved / relative
+            if candidate.is_dir() and candidate not in seen:
+                seen.add(candidate)
+                result.append(candidate)
+    return result
+
+
+def existing_library_dirs(directories: Iterable[Path]) -> list[Path]:
+    result: list[Path] = []
+    seen: set[Path] = set()
+    for directory in directories:
+        resolved = directory.resolve()
+        if resolved.is_dir() and resolved not in seen:
+            seen.add(resolved)
+            result.append(resolved)
+    return result
+
+
+def library_in_directories(soname: str, directories: Iterable[Path]) -> Path | None:
+    for directory in directories:
+        candidate = directory / soname
+        try:
+            target = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if target.is_file():
+            return candidate
+    return None
+
+
+def compiler_runtime_library(soname: str) -> tuple[Path | None, str | None, list[str]]:
+    considered: list[str] = []
+    found: list[tuple[str, Path, Path]] = []
+    for compiler in COMPILER_COMMANDS:
+        result = run([compiler, f"-print-file-name={soname}"], check=False)
+        output = result.stdout.strip()
+        considered.append(f"{compiler}:{output or '<no output>'}")
+        if result.returncode != 0 or not output or output == soname:
+            continue
+        candidate = Path(output)
+        try:
+            target = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if target.is_file():
+            found.append((compiler, candidate, target))
+    if not found:
+        return None, None, considered
+    resolved_targets = {target for _compiler, _candidate, target in found}
+    if len(resolved_targets) != 1:
+        raise RuntimeErrorWithContext(
+            f"active compilers disagree on runtime {soname}: " + ", ".join(considered)
+        )
+    compiler, candidate, _target = found[0]
+    return candidate, compiler, considered
+
+
+def is_compiler_runtime(soname: str) -> bool:
+    return soname.startswith(COMPILER_RUNTIME_PREFIXES)
+
+
 def ldconfig_library_map() -> dict[str, Path]:
     output = run(["ldconfig", "-p"]).stdout
     result: dict[str, Path] = {}
@@ -243,17 +339,26 @@ def copy_system_library(source: Path, requested_name: str, dependency_root: Path
     return copied
 
 
-def stage_dependency_closure(root: Path) -> list[str]:
+def stage_dependency_closure(
+    root: Path,
+    *,
+    dependency_prefixes: Iterable[Path],
+    system_library_dirs: Iterable[Path],
+    glibc_baseline: str,
+) -> tuple[list[str], list[dict[str, str]]]:
     dependency_root = root / DEPENDENCY_DIR
     dependency_root.mkdir(parents=True, exist_ok=True)
-    host = set(HOST_LIBRARY_ALLOWLIST)
-    system = ldconfig_library_map()
+    host = set(host_library_allowlist(glibc_baseline))
+    dependency_dirs = dependency_prefix_library_dirs(dependency_prefixes)
+    system_dirs = existing_library_dirs(system_library_dirs)
+    ldconfig: dict[str, Path] | None = None
     bundled_sonames: set[str] = set()
+    provenance: dict[str, dict[str, str]] = {}
 
     for _iteration in range(64):
         internal = internal_library_map(root)
         copied_any = False
-        unresolved: set[str] = set()
+        unresolved: dict[str, list[str]] = {}
         required: set[str] = set()
         for elf in elf_files(root):
             required.update(needed_libraries(elf))
@@ -261,6 +366,12 @@ def stage_dependency_closure(root: Path) -> list[str]:
         for soname in sorted(required):
             if soname in host:
                 continue
+            minimum_glibc = HOST_LIBRARY_MIN_GLIBC.get(soname)
+            if minimum_glibc is not None and version_key(minimum_glibc) > version_key(glibc_baseline):
+                raise RuntimeErrorWithContext(
+                    f"{soname} is a glibc component introduced in GLIBC_{minimum_glibc}, "
+                    f"newer than selected baseline GLIBC_{glibc_baseline}"
+                )
             bundled_sonames.add(soname)
             flat = dependency_root / soname
             if flat.is_symlink() or flat.exists():
@@ -269,18 +380,65 @@ def stage_dependency_closure(root: Path) -> list[str]:
             if internal_target is not None:
                 ensure_relative_symlink(flat, internal_target)
                 continue
-            system_target = system.get(soname)
-            if system_target is None:
-                unresolved.add(soname)
+
+            considered: list[str] = []
+            selected = library_in_directories(soname, dependency_dirs)
+            tier = "dependency-prefix"
+            compiler = ""
+            if selected is not None:
+                considered.append(f"dependency-prefix:{selected}")
+            else:
+                considered.extend(f"dependency-prefix:{directory / soname}" for directory in dependency_dirs)
+                selected, compiler_name, compiler_considered = compiler_runtime_library(soname)
+                considered.extend(f"compiler-runtime:{item}" for item in compiler_considered)
+                if selected is not None:
+                    tier = "compiler-runtime"
+                    compiler = compiler_name or ""
+                else:
+                    selected = library_in_directories(soname, system_dirs)
+                    tier = "manylinux-system"
+                    if selected is not None:
+                        considered.append(f"manylinux-system:{selected}")
+                    else:
+                        considered.extend(f"manylinux-system:{directory / soname}" for directory in system_dirs)
+                        if ldconfig is None:
+                            ldconfig = ldconfig_library_map()
+                        selected = ldconfig.get(soname)
+                        tier = "ldconfig"
+                        considered.append(f"ldconfig:{selected if selected is not None else '<not found>'}")
+
+            if selected is None:
+                unresolved[soname] = considered
                 continue
-            copied_any = copy_system_library(system_target, soname, dependency_root) or copied_any
+            if is_compiler_runtime(soname) and tier not in {"dependency-prefix", "compiler-runtime"}:
+                raise RuntimeErrorWithContext(
+                    f"compiler runtime {soname} resolved from unsafe tier {tier}: {selected}; "
+                    "the active compiler toolchain did not select this library"
+                )
+
+            real_source = selected.resolve(strict=True)
+            copied_any = copy_system_library(selected, soname, dependency_root) or copied_any
+            record = {
+                "soname": soname,
+                "selected_path": str(selected.absolute()),
+                "source_path": str(real_source),
+                "source_sha256": sha256_file(real_source),
+                "search_tier": tier,
+            }
+            if compiler:
+                record["compiler"] = compiler
+            provenance[soname] = record
 
         if unresolved:
+            details = []
+            for soname, considered in sorted(unresolved.items()):
+                candidates = ", ".join(considered) if considered else "<none>"
+                details.append(f"{soname} (considered: {candidates})")
             raise RuntimeErrorWithContext(
-                "unresolved ELF dependencies: " + ", ".join(sorted(unresolved))
+                "unresolved ELF dependencies: " + "; ".join(details)
             )
         if not copied_any:
-            return sorted(bundled_sonames)
+            return sorted(bundled_sonames), [provenance[name] for name in sorted(provenance)]
 
     raise RuntimeErrorWithContext("ELF dependency closure did not converge")
 
@@ -318,9 +476,9 @@ def audit_runpaths(root: Path) -> None:
         raise RuntimeErrorWithContext("\n".join(failures[:40]))
 
 
-def audit_dependency_resolution(root: Path) -> None:
+def audit_dependency_resolution(root: Path, host_allowlist: Iterable[str]) -> None:
     failures: list[str] = []
-    host = set(HOST_LIBRARY_ALLOWLIST)
+    host = set(host_allowlist)
     clean_env = os.environ.copy()
     for name in ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT", "LD_DEBUG"):
         clean_env.pop(name, None)
@@ -366,6 +524,20 @@ def audit_dependency_resolution(root: Path) -> None:
 
     if failures:
         raise RuntimeErrorWithContext("\n\n".join(failures[:30]))
+
+
+def audit_compiler_runtime_closure(root: Path) -> None:
+    internal = internal_library_map(root)
+    failures: list[str] = []
+    for elf in elf_files(root):
+        for soname in needed_libraries(elf):
+            if is_compiler_runtime(soname) and soname not in internal:
+                failures.append(
+                    f"{elf.relative_to(root)} requires compiler runtime {soname}, "
+                    "but it does not resolve inside the packaged runtime"
+                )
+    if failures:
+        raise RuntimeErrorWithContext("\n".join(failures[:40]))
 
 
 def version_key(version: str) -> tuple[int, ...]:
@@ -562,12 +734,21 @@ def ensure_internal_symlinks(root: Path) -> None:
         raise RuntimeErrorWithContext("\n".join(failures[:40]))
 
 
-def write_manifest(args: argparse.Namespace, bundled_sonames: list[str]) -> dict[str, object]:
+def write_manifest(
+    args: argparse.Namespace,
+    bundled_sonames: list[str],
+    dependency_provenance: list[dict[str, str]],
+) -> dict[str, object]:
     root = args.runtime_root.resolve()
     entries = manifest_entries(root)
     totals = payload_totals(entries)
     abi = max_required_abi_versions(root)
     enforce_glibc_baseline(abi, args.glibc_baseline)
+    host_allowlist = host_library_allowlist(args.glibc_baseline)
+    system_library_dirs = [
+        *(args.system_library_dir or []),
+        *DEFAULT_MANYLINUX_SYSTEM_LIBRARY_DIRS,
+    ]
 
     manifest: dict[str, object] = {
         "format_version": 1,
@@ -581,8 +762,11 @@ def write_manifest(args: argparse.Namespace, bundled_sonames: list[str]) -> dict
         "build_image": args.build_image,
         "selected_glibc_baseline": args.glibc_baseline,
         "abi_max_required": abi,
-        "host_library_allowlist": list(HOST_LIBRARY_ALLOWLIST),
+        "host_library_allowlist": list(host_allowlist),
+        "dependency_prefixes": [str(path.resolve()) for path in args.dependency_prefix],
+        "system_library_dirs": [str(path.resolve()) for path in system_library_dirs],
         "runtime_dependency_sonames": bundled_sonames,
+        "runtime_dependency_provenance": dependency_provenance,
         "configure_args": read_configure_args(args.configure_args_file),
         "build_provenance": build_provenance(),
         **totals,
@@ -648,16 +832,28 @@ def verify_tree(root: Path, expected_profile: str, smoke: bool) -> dict[str, obj
     ensure_internal_symlinks(root)
     audit_architecture(root)
     audit_runpaths(root)
-    audit_dependency_resolution(root)
+    baseline = str(manifest.get("selected_glibc_baseline", ""))
+    if not baseline:
+        raise RuntimeErrorWithContext("runtime manifest is missing selected_glibc_baseline")
+    host_allowlist = host_library_allowlist(baseline)
+    manifest_host_allowlist = manifest.get("host_library_allowlist")
+    if (
+        not isinstance(manifest_host_allowlist, list)
+        or not all(isinstance(item, str) for item in manifest_host_allowlist)
+        or set(manifest_host_allowlist) != set(host_allowlist)
+    ):
+        raise RuntimeErrorWithContext(
+            "runtime manifest host_library_allowlist does not match selected glibc baseline"
+        )
+    audit_dependency_resolution(root, host_allowlist)
+    audit_compiler_runtime_closure(root)
 
     actual_abi = max_required_abi_versions(root)
     if manifest.get("abi_max_required") != actual_abi:
         raise RuntimeErrorWithContext(
             f"ABI requirements differ from manifest: {actual_abi!r}"
         )
-    baseline = str(manifest.get("selected_glibc_baseline", ""))
-    if baseline:
-        enforce_glibc_baseline(actual_abi, baseline)
+    enforce_glibc_baseline(actual_abi, baseline)
 
     if smoke:
         run_smoke(root)
@@ -722,18 +918,29 @@ def prepare(args: argparse.Namespace) -> int:
     require_commands(
         ["g++", "gcc", "gfortran", "ld", "ldconfig", "ldd", "objdump", "patchelf", "readelf"]
     )
-    bundled = stage_dependency_closure(root)
+    system_library_dirs = [
+        *(args.system_library_dir or []),
+        *DEFAULT_MANYLINUX_SYSTEM_LIBRARY_DIRS,
+    ]
+    bundled, dependency_provenance = stage_dependency_closure(
+        root,
+        dependency_prefixes=args.dependency_prefix,
+        system_library_dirs=system_library_dirs,
+        glibc_baseline=args.glibc_baseline,
+    )
     patch_relative_runpaths(root)
     ensure_internal_symlinks(root)
     audit_architecture(root)
     audit_runpaths(root)
-    audit_dependency_resolution(root)
+    host_allowlist = host_library_allowlist(args.glibc_baseline)
+    audit_dependency_resolution(root, host_allowlist)
+    audit_compiler_runtime_closure(root)
     scan_forbidden_prefixes(
         root,
         args.forbidden_prefix,
         octave_source_prefix=args.octave_source_prefix,
     )
-    manifest = write_manifest(args, bundled)
+    manifest = write_manifest(args, bundled, dependency_provenance)
     print("runtime_prepare=pass")
     print(f"runtime_files={manifest['payload_files']}")
     print(f"runtime_bytes={manifest['payload_bytes']}")
@@ -771,6 +978,8 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--configured-prefix", required=True)
     prepare_parser.add_argument("--build-image", required=True)
     prepare_parser.add_argument("--glibc-baseline", required=True)
+    prepare_parser.add_argument("--dependency-prefix", type=Path, action="append", default=[])
+    prepare_parser.add_argument("--system-library-dir", type=Path, action="append")
     prepare_parser.add_argument("--configure-args-file", type=Path)
     prepare_parser.add_argument("--forbidden-prefix", action="append", default=[])
     prepare_parser.add_argument("--octave-source-prefix")

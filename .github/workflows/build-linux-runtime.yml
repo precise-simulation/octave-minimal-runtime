@@ -33,9 +33,80 @@ env:
   OCTAVE_SHA256: 2b80f3149b2de6d1f4f2fcb4fe6515a17eb363b52111bf57b90f37bf6f5e12e1
   BUILD_IMAGE: ubuntu:22.04@sha256:b682e31336cc8e0a73ed91ab32b7a95e32591c5ff09994490a20accf9b3600f9
   GLIBC_BASELINE: '2.35'
+  MANYLINUX_IMAGE: quay.io/pypa/manylinux2014_x86_64@sha256:8a79ff36ce155d8f242dc8013d73c5e8bbe937defb15de7d7afb342c1ab537f4
+  MANYLINUX_GLIBC_BASELINE: '2.17'
   SOURCE_DATE_EPOCH: '1780272000'
 
 jobs:
+  manylinux-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out runtime builder
+        uses: actions/checkout@v7
+
+      - name: Record hosted runner baseline
+        shell: bash
+        run: |
+          set -euxo pipefail
+          evidence="$RUNNER_TEMP/manylinux2014-smoke"
+          mkdir -p "$evidence"
+          {
+            printf 'runner_os=%s\n' "$RUNNER_OS"
+            printf 'runner_arch=%s\n' "$RUNNER_ARCH"
+            printf 'image_os=%s\n' "${ImageOS:-unknown}"
+            printf 'image_version=%s\n' "${ImageVersion:-unknown}"
+            printf 'kernel=%s\n' "$(uname -srvmo)"
+            printf 'manylinux_image=%s\n' "$MANYLINUX_IMAGE"
+          } | tee "$evidence/host.txt"
+          printf 'MANYLINUX_EVIDENCE=%s\n' "$evidence" >> "$GITHUB_ENV"
+
+      - name: Verify pinned manylinux2014 toolchain baseline
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker pull "$MANYLINUX_IMAGE"
+          docker image inspect "$MANYLINUX_IMAGE" \
+            --format '{{json .RepoDigests}}' | tee "$MANYLINUX_EVIDENCE/image-repodigests.json"
+
+          docker run --rm \
+            --platform linux/amd64 \
+            --volume "$MANYLINUX_EVIDENCE:/evidence" \
+            --env EXPECTED_GLIBC="$MANYLINUX_GLIBC_BASELINE" \
+            "$MANYLINUX_IMAGE" \
+            /bin/bash -lc '
+              set -euxo pipefail
+              source /opt/rh/devtoolset-10/enable
+              glibc_version="$(getconf GNU_LIBC_VERSION)"
+              glibc_version="${glibc_version#glibc }"
+              gcc_version="$(gcc -dumpfullversion -dumpversion)"
+              test "$glibc_version" = "$EXPECTED_GLIBC"
+              test "${gcc_version%%.*}" = "10"
+              {
+                cat /etc/os-release
+                printf "glibc=%s\n" "$glibc_version"
+                ldd --version | sed -n "1p"
+                gcc --version | sed -n "1p"
+                g++ --version | sed -n "1p"
+                gfortran --version | sed -n "1p"
+                ld --version | sed -n "1p"
+                printf "gcc_path=%s\n" "$(command -v gcc)"
+                printf "gxx_path=%s\n" "$(command -v g++)"
+                printf "gfortran_path=%s\n" "$(command -v gfortran)"
+              } | tee /evidence/container.txt
+            '
+
+      - name: Upload manylinux2014 smoke evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: featool-octave-runtime-linux-x64-glibc217-smoke
+          path: ${{ runner.temp }}/manylinux2014-smoke
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
