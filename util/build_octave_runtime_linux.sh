@@ -10,7 +10,10 @@ usage() {
 Usage: build_octave_runtime_linux.sh \
   --source-dir DIR --build-dir DIR --destination DIR \
   --source-archive NAME --source-sha256 SHA256 \
-  --build-image IMAGE --glibc-baseline VERSION [--jobs N] [--validate]
+  --build-image IMAGE --glibc-baseline VERSION \
+  [--dependency-prefix DIR] [--python COMMAND] \
+  [--expected-build-glibc VERSION] [--expected-gcc-major N] \
+  [--jobs N] [--validate]
 
 Build GNU Octave 11.3.0 from source, install it into the disposable container's
 configured prefix, prune development content, assemble a relocatable ELF
@@ -26,6 +29,10 @@ source_archive=""
 source_sha256=""
 build_image=""
 glibc_baseline=""
+dependency_prefix=""
+python_command="python3"
+expected_build_glibc=""
+expected_gcc_major=""
 jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '2')"
 validate=0
 
@@ -38,6 +45,10 @@ while [[ $# -gt 0 ]]; do
     --source-sha256) source_sha256="$2"; shift 2 ;;
     --build-image) build_image="$2"; shift 2 ;;
     --glibc-baseline) glibc_baseline="$2"; shift 2 ;;
+    --dependency-prefix) dependency_prefix="$2"; shift 2 ;;
+    --python) python_command="$2"; shift 2 ;;
+    --expected-build-glibc) expected_build_glibc="$2"; shift 2 ;;
+    --expected-gcc-major) expected_gcc_major="$2"; shift 2 ;;
     --jobs) jobs="$2"; shift 2 ;;
     --validate) validate=1; shift ;;
     --graphics-support)
@@ -57,12 +68,16 @@ for required_name in source_dir build_dir destination source_archive source_sha2
   fi
 done
 
-for command_name in bash make python3 gcc g++ gfortran patchelf readelf objdump ldconfig ldd; do
+for command_name in bash make gcc g++ gfortran getconf patchelf readelf objdump ldconfig ldd; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     printf 'error: required command is missing: %s\n' "$command_name" >&2
     exit 1
   fi
 done
+if ! command -v "$python_command" >/dev/null 2>&1; then
+  printf 'error: requested Python interpreter is missing: %s\n' "$python_command" >&2
+  exit 1
+fi
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 runtime_tool="$script_dir/linux_runtime_tool.py"
@@ -74,6 +89,35 @@ fi
 source_dir="$(realpath "$source_dir")"
 build_dir="$(realpath -m "$build_dir")"
 destination="$(realpath -m "$destination")"
+if [[ -n "$dependency_prefix" ]]; then
+  dependency_prefix="$(realpath "$dependency_prefix")"
+  if [[ ! -d "$dependency_prefix/include" ]]; then
+    printf 'error: dependency prefix include directory is missing: %s/include\n' "$dependency_prefix" >&2
+    exit 1
+  fi
+  if [[ ! -d "$dependency_prefix/lib" ]] && [[ ! -d "$dependency_prefix/lib64" ]]; then
+    printf 'error: dependency prefix library directories are missing: %s\n' "$dependency_prefix" >&2
+    exit 1
+  fi
+fi
+
+build_glibc="$(getconf GNU_LIBC_VERSION)"
+build_glibc="${build_glibc#glibc }"
+gcc_version="$(gcc -dumpfullversion -dumpversion)"
+gxx_version="$(g++ -dumpfullversion -dumpversion)"
+gfortran_version="$(gfortran -dumpfullversion -dumpversion)"
+if [[ -n "$expected_build_glibc" ]] && [[ "$build_glibc" != "$expected_build_glibc" ]]; then
+  printf 'error: expected build glibc %s, found %s\n' "$expected_build_glibc" "$build_glibc" >&2
+  exit 1
+fi
+if [[ -n "$expected_gcc_major" ]]; then
+  for compiler_version in "$gcc_version" "$gxx_version" "$gfortran_version"; do
+    if [[ "${compiler_version%%.*}" != "$expected_gcc_major" ]]; then
+      printf 'error: expected compiler major %s, found %s\n' "$expected_gcc_major" "$compiler_version" >&2
+      exit 1
+    fi
+  done
+fi
 
 if [[ ! -x "$source_dir/configure" ]]; then
   printf 'error: GNU Octave configure script is missing: %s/configure\n' "$source_dir" >&2
@@ -121,15 +165,37 @@ export CFLAGS="$configure_flags"
 export CXXFLAGS="$configure_flags"
 export FFLAGS="$configure_flags"
 export FCFLAGS="$configure_flags"
-export CPPFLAGS="${CPPFLAGS:-} -I/usr/include/hdf5/serial -I/usr/include/suitesparse"
-export LDFLAGS="${LDFLAGS:-} -L/usr/lib/x86_64-linux-gnu/hdf5/serial"
+if [[ -n "$dependency_prefix" ]]; then
+  dependency_cppflags="-I$dependency_prefix/include"
+  if [[ -d "$dependency_prefix/include/suitesparse" ]]; then
+    dependency_cppflags="$dependency_cppflags -I$dependency_prefix/include/suitesparse"
+  fi
+  export CPPFLAGS="$dependency_cppflags"
+  export LDFLAGS="-L$dependency_prefix/lib -L$dependency_prefix/lib64 -Wl,-rpath-link,$dependency_prefix/lib -Wl,-rpath-link,$dependency_prefix/lib64"
+  export PKG_CONFIG_PATH="$dependency_prefix/lib/pkgconfig:$dependency_prefix/lib64/pkgconfig:$dependency_prefix/share/pkgconfig"
+  export PKG_CONFIG_LIBDIR="$PKG_CONFIG_PATH"
+  export LD_LIBRARY_PATH="$dependency_prefix/lib:$dependency_prefix/lib64:${LD_LIBRARY_PATH:-}"
+  export BLAS_LIBS="-lopenblas"
+  export LAPACK_LIBS="-lopenblas"
+else
+  export CPPFLAGS="${CPPFLAGS:-} -I/usr/include/hdf5/serial -I/usr/include/suitesparse"
+  export LDFLAGS="${LDFLAGS:-} -L/usr/lib/x86_64-linux-gnu/hdf5/serial"
+fi
 export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1780272000}"
 export TZ="UTC"
-export LC_ALL="C.UTF-8"
+export LANG="C"
+export LC_ALL="C"
 
 printf 'octave_version=%s\n' "$OCTAVE_VERSION"
 printf 'build_image=%s\n' "$build_image"
 printf 'glibc_baseline=%s\n' "$glibc_baseline"
+printf 'build_glibc=%s\n' "$build_glibc"
+printf 'gcc_version=%s\n' "$gcc_version"
+printf 'gxx_version=%s\n' "$gxx_version"
+printf 'gfortran_version=%s\n' "$gfortran_version"
+printf 'python=%s\n' "$(command -v "$python_command")"
+"$python_command" --version
+printf 'dependency_prefix=%s\n' "${dependency_prefix:-none}"
 printf 'source_dir=%s\n' "$source_dir"
 printf 'build_dir=%s\n' "$build_dir"
 printf 'destination=%s\n' "$destination"
@@ -170,6 +236,9 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[]) {
 EOF
 
 install_ld_path="$(find "$install_root/lib" -type d -print | paste -sd: -)"
+if [[ -n "$dependency_prefix" ]]; then
+  install_ld_path="$install_ld_path:$dependency_prefix/lib:$dependency_prefix/lib64"
+fi
 env \
   PATH="$install_root/bin:$PATH" \
   OCTAVE_HOME="$install_root" \
@@ -234,7 +303,8 @@ exec "$runtime_root/bin/octave-cli" --no-window-system --no-init-all "$@"
 EOF
 chmod 0755 "$destination/bin/featool-octave"
 
-python3 "$runtime_tool" prepare \
+runtime_prepare_args=(
+  "$runtime_tool" prepare
   --runtime-root "$destination" \
   --source-archive "$source_archive" \
   --source-sha256 "$source_sha256" \
@@ -245,6 +315,11 @@ python3 "$runtime_tool" prepare \
   --octave-source-prefix "$source_dir" \
   --forbidden-prefix "$source_dir" \
   --forbidden-prefix "$build_dir"
+)
+if [[ -n "$dependency_prefix" ]]; then
+  runtime_prepare_args+=(--dependency-prefix "$dependency_prefix")
+fi
+"$python_command" "${runtime_prepare_args[@]}"
 
 if [[ "$validate" -eq 1 ]]; then
   validation_home="$build_dir/validation-home"
@@ -256,19 +331,19 @@ if [[ "$validate" -eq 1 ]]; then
   env -i \
     HOME="$validation_home" \
     PATH="/usr/bin:/bin" \
-    LANG="C.UTF-8" \
-    LC_ALL="C.UTF-8" \
+    LANG="C" \
+    LC_ALL="C" \
     "$runtime_launcher" --quiet --eval "$eval_code"
 
   mex_eval="addpath('$octave_probe_dir'); y=octave_runtime_mex_probe(41); assert(y==42); disp('LINUX_MEX_RUNTIME=pass');"
   env -i \
     HOME="$validation_home" \
     PATH="/usr/bin:/bin" \
-    LANG="C.UTF-8" \
-    LC_ALL="C.UTF-8" \
+    LANG="C" \
+    LC_ALL="C" \
     "$runtime_launcher" --quiet --eval "$mex_eval"
 
-  python3 "$runtime_tool" verify \
+  "$python_command" "$runtime_tool" verify \
     --runtime-root "$destination" \
     --expected-profile "$PROFILE" \
     --smoke

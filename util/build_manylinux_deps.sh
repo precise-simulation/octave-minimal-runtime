@@ -44,7 +44,7 @@ for required_name in source_dir lock_file prefix work_dir evidence_dir; do
   fi
 done
 
-for command_name in bash cmake gcc g++ gfortran getconf make objdump perl pkg-config readelf sha256sum tar; do
+for command_name in bash cmake gcc g++ gfortran getconf ld make objdump perl pkg-config readelf realpath sha256sum tar xz; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     printf 'error: required command is missing: %s\n' "$command_name" >&2
     exit 1
@@ -212,10 +212,10 @@ build_openssl() {
   local src
   src="$(extract_source openssl)"
   pushd "$src" >/dev/null
-  record_command openssl ./Configure linux-x86_64 shared --prefix="$prefix" --libdir=lib --openssldir=/etc/ssl no-tests no-docs no-legacy no-autoload-config
+  record_command openssl ./Configure linux-x86_64 shared --prefix="$prefix" --libdir=lib --openssldir=/etc/ssl no-tests no-legacy no-autoload-config
   ./Configure linux-x86_64 shared \
     --prefix="$prefix" --libdir=lib --openssldir=/etc/ssl \
-    no-tests no-docs no-legacy no-autoload-config
+    no-tests no-legacy no-autoload-config
   make -j"$jobs"
   make install_sw
   popd >/dev/null
@@ -246,7 +246,7 @@ build_readline() {
   record_command readline ./configure --prefix="$prefix" --enable-shared --disable-static --with-curses --with-shared-termcap-library
   ./configure --prefix="$prefix" --enable-shared --disable-static --with-curses --with-shared-termcap-library
   make -j"$jobs" SHLIB_LIBS="-L$prefix/lib -ltinfo"
-  make install
+  make install SHLIB_LIBS="-L$prefix/lib -ltinfo"
   popd >/dev/null
 }
 
@@ -453,16 +453,30 @@ done
 find "$prefix" -type f \( -name '*.a' -o -name '*.la' \) -delete
 
 : > "$evidence_dir/elf-abi.tsv"
+: > "$evidence_dir/elf-needed.tsv"
 max_glibc=""
+max_glibcxx=""
+max_cxxabi=""
+max_gcc=""
 while IFS= read -r -d '' candidate; do
   if ! readelf -h "$candidate" >/dev/null 2>&1; then
     continue
   fi
   relative="${candidate#"$prefix"/}"
-  if readelf -d --wide "$candidate" 2>/dev/null | grep -q 'Shared library: \[libmvec\.so\.1\]'; then
+  dynamic="$(readelf -d --wide "$candidate" 2>/dev/null || true)"
+  if grep -q 'Shared library: \[libmvec\.so\.1\]' <<< "$dynamic"; then
     printf 'error: dependency prefix contains libmvec dependency: %s\n' "$relative" >&2
     exit 1
   fi
+  if grep -E 'Library (rpath|runpath): \[.*(/opt/featool-deps|/work)' <<< "$dynamic" >/dev/null; then
+    printf 'error: dependency prefix contains build-path RPATH/RUNPATH: %s\n' "$relative" >&2
+    grep -E 'Library (rpath|runpath):' <<< "$dynamic" >&2 || true
+    exit 1
+  fi
+  while IFS= read -r needed; do
+    [[ -z "$needed" ]] && continue
+    printf '%s\t%s\n' "$relative" "$needed" >> "$evidence_dir/elf-needed.tsv"
+  done < <(sed -n 's/.*Shared library: \[\([^]]*\)\].*/\1/p' <<< "$dynamic")
   required="$(
     objdump -T "$candidate" 2>/dev/null \
       | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' \
@@ -471,12 +485,31 @@ while IFS= read -r -d '' candidate; do
       | tail -n 1 \
       || true
   )"
-  printf '%s\t%s\n' "$relative" "${required:-none}" >> "$evidence_dir/elf-abi.tsv"
+  required_glibcxx="$(objdump -T "$candidate" 2>/dev/null | grep -oE 'GLIBCXX_[0-9]+(\.[0-9]+)+' | sed 's/^GLIBCXX_//' | sort -Vu | tail -n 1 || true)"
+  required_cxxabi="$(objdump -T "$candidate" 2>/dev/null | grep -oE 'CXXABI_[0-9]+(\.[0-9]+)+' | sed 's/^CXXABI_//' | sort -Vu | tail -n 1 || true)"
+  required_gcc="$(objdump -T "$candidate" 2>/dev/null | grep -oE 'GCC_[0-9]+(\.[0-9]+)+' | sed 's/^GCC_//' | sort -Vu | tail -n 1 || true)"
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    "$relative" "${required:-none}" "${required_glibcxx:-none}" \
+    "${required_cxxabi:-none}" "${required_gcc:-none}" \
+    >> "$evidence_dir/elf-abi.tsv"
   if [[ -n "$required" ]]; then
     if [[ -z "$max_glibc" ]] || [[ "$(printf '%s\n%s\n' "$max_glibc" "$required" | sort -V | tail -n 1)" == "$required" ]]; then
       max_glibc="$required"
     fi
   fi
+  for family in glibcxx cxxabi gcc; do
+    case "$family" in
+      glibcxx) value="$required_glibcxx" ;;
+      cxxabi) value="$required_cxxabi" ;;
+      gcc) value="$required_gcc" ;;
+    esac
+    [[ -z "$value" ]] && continue
+    current_name="max_$family"
+    current="${!current_name}"
+    if [[ -z "$current" ]] || [[ "$(printf '%s\n%s\n' "$current" "$value" | sort -V | tail -n 1)" == "$value" ]]; then
+      printf -v "$current_name" '%s' "$value"
+    fi
+  done
 done < <(find "$prefix" -type f -print0)
 
 if [[ -n "$max_glibc" ]] && [[ "$(printf '%s\n%s\n' "$EXPECTED_GLIBC" "$max_glibc" | sort -V | tail -n 1)" != "$EXPECTED_GLIBC" ]]; then
@@ -484,7 +517,12 @@ if [[ -n "$max_glibc" ]] && [[ "$(printf '%s\n%s\n' "$EXPECTED_GLIBC" "$max_glib
   exit 1
 fi
 
-printf 'max_required_glibc=%s\n' "${max_glibc:-none}" | tee "$evidence_dir/abi-summary.txt"
+{
+  printf 'max_required_glibc=%s\n' "${max_glibc:-none}"
+  printf 'max_required_glibcxx=%s\n' "${max_glibcxx:-none}"
+  printf 'max_required_cxxabi=%s\n' "${max_cxxabi:-none}"
+  printf 'max_required_gcc=%s\n' "${max_gcc:-none}"
+} | tee "$evidence_dir/abi-summary.txt"
 (
   cd "$prefix"
   find . -type f \( -name '*.so' -o -name '*.so.*' \) -print0 \
