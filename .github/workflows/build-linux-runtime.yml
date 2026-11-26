@@ -1,0 +1,176 @@
+name: Build Linux runtime
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - 'feat/**'
+    paths:
+      - .github/workflows/build-linux-runtime.yml
+      - util/build_octave_runtime_linux.sh
+      - util/linux_runtime_tool.py
+      - README.md
+  pull_request:
+    paths:
+      - .github/workflows/build-linux-runtime.yml
+      - util/build_octave_runtime_linux.sh
+      - util/linux_runtime_tool.py
+      - README.md
+
+permissions:
+  contents: read
+
+env:
+  OCTAVE_VERSION: 11.3.0
+  OCTAVE_ARCHIVE: octave-11.3.0.tar.xz
+  OCTAVE_URL: https://ftp.gnu.org/gnu/octave/octave-11.3.0.tar.xz
+  OCTAVE_SHA256: 2b80f3149b2de6d1f4f2fcb4fe6515a17eb363b52111bf57b90f37bf6f5e12e1
+  BUILD_IMAGE: ubuntu:22.04@sha256:b682e31336cc8e0a73ed91ab32b7a95e32591c5ff09994490a20accf9b3600f9
+  GLIBC_BASELINE: '2.35'
+  SOURCE_DATE_EPOCH: '1780272000'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    container:
+      image: ubuntu:22.04@sha256:b682e31336cc8e0a73ed91ab32b7a95e32591c5ff09994490a20accf9b3600f9
+
+    steps:
+      - name: Install build and runtime-audit dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            binutils \
+            bison \
+            build-essential \
+            ca-certificates \
+            curl \
+            file \
+            flex \
+            gfortran \
+            git \
+            libarpack2-dev \
+            libblas-dev \
+            libfftw3-dev \
+            libhdf5-dev \
+            liblapack-dev \
+            libltdl-dev \
+            libpcre2-dev \
+            libreadline-dev \
+            libsuitesparse-dev \
+            libtool \
+            patchelf \
+            perl \
+            pkg-config \
+            python3 \
+            rapidjson-dev \
+            strace \
+            xz-utils \
+            zlib1g-dev \
+            zstd
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Check out runtime builder
+        uses: actions/checkout@v7
+
+      - name: Record pinned build baseline
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cat /etc/os-release
+          ldd --version | head -n 1
+          gcc --version | head -n 1
+          g++ --version | head -n 1
+          gfortran --version | head -n 1
+          ld --version | head -n 1
+
+      - name: Download and verify GNU Octave source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          archive="$RUNNER_TEMP/$OCTAVE_ARCHIVE"
+          curl --fail --location --retry 4 --output "$archive" "$OCTAVE_URL"
+          printf '%s  %s\n' "$OCTAVE_SHA256" "$archive" | sha256sum --check --strict
+
+          source_dir="$RUNNER_TEMP/octave-$OCTAVE_VERSION-source"
+          mkdir -p "$source_dir"
+          tar -xJf "$archive" -C "$source_dir" --strip-components=1
+          printf 'OCTAVE_SOURCE=%s\n' "$source_dir" >> "$GITHUB_ENV"
+
+      - name: Build and validate headless Linux runtime
+        shell: bash
+        run: |
+          set -euxo pipefail
+          build_dir="$RUNNER_TEMP/octave-linux-build"
+          runtime_dir="$RUNNER_TEMP/featool-octave-linux-x64"
+          bash ./util/build_octave_runtime_linux.sh \
+            --source-dir "$OCTAVE_SOURCE" \
+            --build-dir "$build_dir" \
+            --destination "$runtime_dir" \
+            --source-archive "$OCTAVE_ARCHIVE" \
+            --source-sha256 "$OCTAVE_SHA256" \
+            --build-image "$BUILD_IMAGE" \
+            --glibc-baseline "$GLIBC_BASELINE" \
+            --validate
+          printf 'LINUX_RUNTIME=%s\n' "$runtime_dir" >> "$GITHUB_ENV"
+          printf 'LINUX_BUILD_DIR=%s\n' "$build_dir" >> "$GITHUB_ENV"
+
+      - name: Verify runtime manifest and relocation
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 ./util/linux_runtime_tool.py verify \
+            --runtime-root "$LINUX_RUNTIME" \
+            --expected-profile headless-cli-featool \
+            --smoke
+
+      - name: Create metadata-preserving runtime archive
+        shell: bash
+        run: |
+          set -euxo pipefail
+          output="$GITHUB_WORKSPACE/artifacts"
+          mkdir -p "$output"
+          archive="$output/featool-octave-runtime-linux-x64.tar.zst"
+
+          tar \
+            --sort=name \
+            --mtime="@$SOURCE_DATE_EPOCH" \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -C "$LINUX_RUNTIME" \
+            -cf - . | zstd -19 -T0 -o "$archive"
+
+          sha256sum "$archive" > "$archive.sha256"
+          cp "$LINUX_RUNTIME/runtime-manifest.json" \
+            "$output/featool-octave-runtime-linux-x64.manifest.json"
+          cp "$LINUX_BUILD_DIR/configure.out" \
+            "$output/octave-11.3.0-linux-configure.txt"
+
+          python3 ./util/linux_runtime_tool.py verify \
+            --runtime-root "$LINUX_RUNTIME" \
+            --expected-profile headless-cli-featool \
+            --archive "$archive" \
+            --smoke
+
+          du -sh "$LINUX_RUNTIME" "$archive"
+          cat "$LINUX_RUNTIME/runtime-manifest.json" | python3 -c \
+            "import json,sys; m=json.load(sys.stdin); print('payload_files='+str(m['payload_files'])); print('payload_bytes='+str(m['payload_bytes'])); print('abi_max_required='+json.dumps(m['abi_max_required'],sort_keys=True))"
+
+      - name: Upload Linux runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: featool-octave-runtime-linux-x64
+          path: |
+            artifacts/featool-octave-runtime-linux-x64.tar.zst
+            artifacts/featool-octave-runtime-linux-x64.tar.zst.sha256
+            artifacts/featool-octave-runtime-linux-x64.manifest.json
+            artifacts/octave-11.3.0-linux-configure.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
