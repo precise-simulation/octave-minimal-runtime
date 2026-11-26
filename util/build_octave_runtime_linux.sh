@@ -195,14 +195,19 @@ if [[ -f "$source_dir/COPYING" ]]; then
 fi
 
 cat > "$destination/bin/featool-octave" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-runtime_root="$(CDPATH= cd -- "$script_dir/.." && pwd)"
+#!/bin/sh
+set -eu
+case "$0" in
+  /*) launcher_path="$0" ;;
+  *) launcher_path="$PWD/$0" ;;
+esac
+script_dir="$(CDPATH= cd -P -- "${launcher_path%/*}" && pwd)"
+runtime_root="$(CDPATH= cd -P -- "$script_dir/.." && pwd)"
 export OCTAVE_HOME="$runtime_root"
 export OCTAVE_EXEC_HOME="$runtime_root"
+export PATH="$runtime_root/bin:/usr/bin:/bin"
 unset OCTAVE_PATH OCTAVE_SITE_INITFILE OCTAVE_VERSION_INITFILE LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT
-exec "$runtime_root/bin/octave-cli" --no-window-system "$@"
+exec "$runtime_root/bin/octave-cli" --no-window-system --no-init-all "$@"
 EOF
 chmod 0755 "$destination/bin/featool-octave"
 
