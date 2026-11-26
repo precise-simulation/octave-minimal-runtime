@@ -1,6 +1,7 @@
 name: Build Linux runtime
 
 on:
+  workflow_call:
   workflow_dispatch:
   push:
     branches:
@@ -11,6 +12,7 @@ on:
       - util/build_octave_runtime_linux.sh
       - util/build_manylinux_deps.sh
       - util/linux_runtime_tool.py
+      - util/qualify_linux_runtime.sh
       - util/manylinux-deps.lock
       - README.md
   pull_request:
@@ -19,6 +21,7 @@ on:
       - util/build_octave_runtime_linux.sh
       - util/build_manylinux_deps.sh
       - util/linux_runtime_tool.py
+      - util/qualify_linux_runtime.sh
       - util/manylinux-deps.lock
       - README.md
 
@@ -308,7 +311,16 @@ jobs:
               set -u
               python=/opt/python/cp311-cp311/bin/python
               test -x "$python"
-              "$python" --version | tee /evidence/python.txt
+              {
+                cat /etc/os-release
+                getconf GNU_LIBC_VERSION
+                gcc --version | sed -n "1p"
+                g++ --version | sed -n "1p"
+                gfortran --version | sed -n "1p"
+                ld --version | sed -n "1p"
+                patchelf --version
+                "$python" --version
+              } | tee /evidence/toolchain.txt
               bash /workspace/util/build_octave_runtime_linux.sh \
                 --source-dir /octave-source \
                 --build-dir /work/build \
@@ -354,6 +366,23 @@ jobs:
             "$output/featool-octave-runtime-linux-x64.manifest.json"
           cp "$MANYLINUX_RUNTIME_BUILD/configure.out" \
             "$output/octave-11.3.0-linux-configure.txt"
+          {
+            printf 'runner_image_os=%s\n' "${ImageOS:-unknown}"
+            printf 'runner_image_version=%s\n' "${ImageVersion:-unknown}"
+            printf 'source_date_epoch=%s\n' "$SOURCE_DATE_EPOCH"
+            tar --version | sed -n '1p'
+            zstd --version
+            sha256sum "$archive"
+            python3 - "$MANYLINUX_RUNTIME/runtime-manifest.json" <<'PY'
+          import json
+          import sys
+
+          manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+          print(f"payload_files={manifest['payload_files']}")
+          print(f"payload_bytes={manifest['payload_bytes']}")
+          print("abi_max_required=" + json.dumps(manifest["abi_max_required"], sort_keys=True))
+          PY
+          } | tee "$MANYLINUX_RUNTIME_EVIDENCE/archive.txt"
           du -sh "$MANYLINUX_RUNTIME" "$archive"
 
       - name: Upload glibc 2.17 Linux runtime
@@ -374,6 +403,190 @@ jobs:
             ${{ runner.temp }}/manylinux-runtime-evidence
             ${{ runner.temp }}/manylinux-octave-build/build/configure.out
             ${{ runner.temp }}/manylinux-octave-build/build/configure-args.txt
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 1
+
+  manylinux-compatibility:
+    needs: manylinux-runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: manylinux2014-floor
+            image: quay.io/pypa/manylinux2014_x86_64@sha256:8a79ff36ce155d8f242dc8013d73c5e8bbe937defb15de7d7afb342c1ab537f4
+            setup: ':'
+            python: /opt/python/cp311-cp311/bin/python
+            verify_manifest: '1'
+            check_host_ca: '1'
+          - target: centos7-clean-floor
+            image: centos:7@sha256:be65f488b7764ad3638f236b7b515b3678369a5124c47b8d32916d6487418ea4
+            setup: ':'
+            python: ''
+            verify_manifest: '0'
+            check_host_ca: '0'
+          - target: ubuntu-20.04
+            image: ubuntu:20.04@sha256:8feb4d8ca5354def3d8fce243717141ce31e2c428701f6682bd2fafe15388214
+            setup: 'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends binutils ca-certificates python3'
+            python: /usr/bin/python3
+            verify_manifest: '1'
+            check_host_ca: '1'
+          - target: ubuntu-22.04
+            image: ubuntu:22.04@sha256:b000e69a50ff940390233025e7a337fb8469b509e2334fa4d018ac30f3e18cdb
+            setup: 'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends binutils ca-certificates python3'
+            python: /usr/bin/python3
+            verify_manifest: '1'
+            check_host_ca: '1'
+          - target: ubuntu-24.04
+            image: ubuntu:24.04@sha256:562111b88caa79c71391c0c4d3c2114a7d5c35915c20561fd893cb1e07929e6b
+            setup: 'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends binutils ca-certificates python3'
+            python: /usr/bin/python3
+            verify_manifest: '1'
+            check_host_ca: '1'
+
+    steps:
+      - name: Check out qualification harness
+        uses: actions/checkout@v7
+
+      - name: Download exact glibc 2.17 runtime artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: featool-octave-runtime-linux-x64-glibc217
+          path: ${{ runner.temp }}/manylinux-runtime-artifact
+
+      - name: Verify archive and prepare deterministic TLS fixture
+        shell: bash
+        run: |
+          set -euxo pipefail
+          artifact_dir="$RUNNER_TEMP/manylinux-runtime-artifact"
+          archive="$artifact_dir/featool-octave-runtime-linux-x64.tar.zst"
+          (
+            cd "$artifact_dir"
+            sha256sum --check --strict featool-octave-runtime-linux-x64.tar.zst.sha256
+          )
+          zstd -d -c "$archive" > "$RUNNER_TEMP/featool-runtime.tar"
+
+          tls="$RUNNER_TEMP/compat-tls"
+          mkdir -p "$tls"
+          openssl req -x509 -newkey rsa:2048 -nodes \
+            -keyout "$tls/ca.key" -out "$tls/ca.crt" \
+            -subj '/CN=FEATool Runtime Test CA' -days 1
+          openssl req -newkey rsa:2048 -nodes \
+            -keyout "$tls/server.key" -out "$tls/server.csr" \
+            -subj '/CN=host.docker.internal'
+          cat > "$tls/server.ext" <<'EOF'
+          subjectAltName=DNS:host.docker.internal
+          extendedKeyUsage=serverAuth
+          EOF
+          openssl x509 -req \
+            -in "$tls/server.csr" \
+            -CA "$tls/ca.crt" \
+            -CAkey "$tls/ca.key" \
+            -CAcreateserial \
+            -out "$tls/server.crt" \
+            -days 1 \
+            -extfile "$tls/server.ext"
+
+          cat > "$tls/server.py" <<'PY'
+          import http.server
+          import ssl
+
+
+          class Handler(http.server.BaseHTTPRequestHandler):
+              def do_GET(self):
+                  body = b"https-ok\n"
+                  self.send_response(200)
+                  self.send_header("Content-Type", "text/plain")
+                  self.send_header("Content-Length", str(len(body)))
+                  self.end_headers()
+                  self.wfile.write(body)
+
+              def log_message(self, format, *args):
+                  pass
+
+
+          server = http.server.ThreadingHTTPServer(("0.0.0.0", 38443), Handler)
+          context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+          context.load_cert_chain("server.crt", "server.key")
+          server.socket = context.wrap_socket(server.socket, server_side=True)
+          server.serve_forever()
+          PY
+          (
+            cd "$tls"
+            python3 server.py > server.log 2>&1 &
+            printf '%s\n' "$!" > server.pid
+          )
+          sleep 1
+          kill -0 "$(cat "$tls/server.pid")"
+
+      - name: Qualify exact archive on ${{ matrix.target }}
+        shell: bash
+        env:
+          TARGET_IMAGE: ${{ matrix.image }}
+          TARGET_SETUP: ${{ matrix.setup }}
+          TARGET_PYTHON: ${{ matrix.python }}
+          VERIFY_MANIFEST: ${{ matrix.verify_manifest }}
+          CHECK_HOST_CA: ${{ matrix.check_host_ca }}
+        run: |
+          set -euxo pipefail
+          evidence="$RUNNER_TEMP/compat-evidence/${{ matrix.target }}"
+          mkdir -p "$evidence"
+          archive_sha="$(sha256sum "$RUNNER_TEMP/manylinux-runtime-artifact/featool-octave-runtime-linux-x64.tar.zst" | awk '{print $1}')"
+
+          docker pull "$TARGET_IMAGE"
+          docker image inspect "$TARGET_IMAGE" --format '{{json .RepoDigests}}' \
+            > "$evidence/image-repodigests.json"
+          printf 'target=%s\nimage=%s\narchive_sha256=%s\n' \
+            '${{ matrix.target }}' "$TARGET_IMAGE" "$archive_sha" \
+            > "$evidence/summary.txt"
+
+          docker run --rm \
+            --platform linux/amd64 \
+            --add-host host.docker.internal:host-gateway \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --volume "$RUNNER_TEMP/featool-runtime.tar:/runtime.tar:ro" \
+            --volume "$RUNNER_TEMP/compat-tls:/qualification:ro" \
+            --volume "$evidence:/evidence" \
+            --env TARGET_SETUP \
+            --env TARGET_PYTHON \
+            --env VERIFY_MANIFEST \
+            --env CHECK_HOST_CA \
+            "$TARGET_IMAGE" \
+            /bin/bash -lc '
+              set -euo pipefail
+              eval "$TARGET_SETUP"
+              mkdir -p /opt/compat-runtime
+              tar -xf /runtime.tar -C /opt/compat-runtime
+              {
+                cat /etc/os-release || true
+                getconf GNU_LIBC_VERSION
+                ldd --version | sed -n "1p"
+              } | tee /evidence/target.txt
+
+              args=(
+                --runtime-root /opt/compat-runtime
+                --work-dir /tmp/featool-qualification
+                --https-url https://host.docker.internal:38443/
+                --https-ca /qualification/ca.crt
+              )
+              if [[ "$VERIFY_MANIFEST" == 1 ]]; then
+                args+=(--runtime-tool /workspace/util/linux_runtime_tool.py --python "$TARGET_PYTHON")
+              fi
+              if [[ "$CHECK_HOST_CA" != 1 ]]; then
+                args+=(--skip-host-ca-check)
+              fi
+              bash /workspace/util/qualify_linux_runtime.sh "${args[@]}" \
+                2>&1 | tee /evidence/qualification.log
+            '
+
+      - name: Upload compatibility evidence for ${{ matrix.target }}
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: featool-octave-runtime-linux-x64-glibc217-${{ matrix.target }}-evidence
+          path: ${{ runner.temp }}/compat-evidence/${{ matrix.target }}
           if-no-files-found: warn
           compression-level: 0
           retention-days: 1

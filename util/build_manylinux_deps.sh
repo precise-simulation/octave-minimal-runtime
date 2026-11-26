@@ -172,18 +172,30 @@ source_root_with_file() {
     return 0
   fi
 
-  local matches=()
+  local best=""
+  local best_depth=""
+  local best_count=0
   while IFS= read -r candidate; do
-    matches+=("${candidate%/$relative_file}")
+    local parent="${candidate%/$relative_file}"
+    local relative="${parent#"$root"/}"
+    local separators="${relative//[^\/]/}"
+    local depth=$(( ${#separators} + 1 ))
+    if [[ -z "$best_depth" ]] || (( depth < best_depth )); then
+      best="$parent"
+      best_depth="$depth"
+      best_count=1
+    elif (( depth == best_depth )); then
+      best_count=$((best_count + 1))
+    fi
   done < <(find "$root" -mindepth 2 -maxdepth 4 -type f -path "*/$relative_file" -print | LC_ALL=C sort)
 
-  if [[ "${#matches[@]}" -ne 1 ]]; then
-    printf 'error: expected exactly one %s below %s, found %s\n' \
-      "$relative_file" "$root" "${#matches[@]}" >&2
+  if [[ -z "$best" ]] || [[ "$best_count" -ne 1 ]]; then
+    printf 'error: expected one shallowest %s below %s, found %s at the shallowest depth\n' \
+      "$relative_file" "$root" "$best_count" >&2
     find "$root" -mindepth 1 -maxdepth 3 -type d -print | LC_ALL=C sort >&2
     return 1
   fi
-  printf '%s\n' "${matches[0]}"
+  printf '%s\n' "$best"
 }
 
 record_command() {
