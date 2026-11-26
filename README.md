@@ -77,9 +77,10 @@ libraries are exposed there through relative symlinks. Every packaged ELF object
 receives an `$ORIGIN`-relative search path. Verification rejects unresolved
 dependencies, non-relative RPATH/RUNPATH entries, external symlink targets,
 non-x86-64 ELF objects, source/build paths in loader-visible ELF metadata, and
-source/build paths in every other delivered file. GNU Octave 11.3's
-`liboctave.so` is the sole raw-byte exception for a known inert libtool
-build-tree string; its dynamic loader metadata remains subject to the same audit.
+source/build paths in every other delivered file. The only raw-byte exception is
+an enumerated set of 30 GNU Fortran diagnostic source filenames embedded in GNU
+Octave 11.3's `liboctave.so.13.0.2`; any other source-prefix occurrence and every
+build-prefix occurrence still fail the audit.
 
 The Linux manifest records file types, modes, regular-file sizes/SHA-256 values,
 symlink targets, build/compiler provenance, exact resolved `dpkg` package

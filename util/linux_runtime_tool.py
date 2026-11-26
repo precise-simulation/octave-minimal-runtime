@@ -44,6 +44,39 @@ VERSION_RE = re.compile(r"\b(GLIBCXX|GLIBC|CXXABI|GCC)_([0-9]+(?:\.[0-9]+)*)\b")
 NEEDED_RE = re.compile(r"Shared library: \[(.+?)\]")
 RPATH_RE = re.compile(r"Library (?:rpath|runpath): \[(.*?)\]")
 
+OCTAVE_FORTRAN_DIAGNOSTIC_SUFFIXES = (
+    "/liboctave/external/ranlib/advnst.f",
+    "/liboctave/external/ranlib/genbet.f",
+    "/liboctave/external/ranlib/genchi.f",
+    "/liboctave/external/ranlib/genexp.f",
+    "/liboctave/external/ranlib/genf.f",
+    "/liboctave/external/ranlib/gengam.f",
+    "/liboctave/external/ranlib/gennch.f",
+    "/liboctave/external/ranlib/gennf.f",
+    "/liboctave/external/ranlib/gennor.f",
+    "/liboctave/external/ranlib/genunf.f",
+    "/liboctave/external/ranlib/getcgn.f",
+    "/liboctave/external/ranlib/getsd.f",
+    "/liboctave/external/ranlib/ignpoi.f",
+    "/liboctave/external/ranlib/ignuin.f",
+    "/liboctave/external/ranlib/initgn.f",
+    "/liboctave/external/ranlib/mltmod.f",
+    "/liboctave/external/ranlib/setant.f",
+    "/liboctave/external/ranlib/setgmn.f",
+    "/liboctave/external/ranlib/setsd.f",
+    "/liboctave/external/dassl/ddassl.f",
+    "/liboctave/external/slatec-err/xermsg.f",
+    "/liboctave/external/slatec-err/xerprn.f",
+    "/liboctave/external/slatec-err/xerrwd.f",
+    "/liboctave/external/slatec-err/xerrwv.f",
+    "/liboctave/external/slatec-err/xersve.f",
+    "/liboctave/external/slatec-err/xsetf.f",
+    "/liboctave/external/slatec-err/xsetua.f",
+    "/liboctave/util/d1mach.f",
+    "/liboctave/util/i1mach.f",
+    "/liboctave/util/r1mach.f",
+)
+
 
 class RuntimeErrorWithContext(RuntimeError):
     pass
@@ -367,7 +400,28 @@ def enforce_glibc_baseline(abi: dict[str, str | None], baseline: str) -> None:
         )
 
 
-def scan_forbidden_prefixes(root: Path, prefixes: Iterable[str]) -> None:
+def strip_allowed_octave_fortran_diagnostics(
+    path: Path,
+    data: bytes,
+    source_prefix: str | None,
+) -> bytes:
+    if source_prefix is None or path.name != "liboctave.so.13.0.2":
+        return data
+
+    sanitized = data
+    prefix = source_prefix.encode()
+    for suffix in OCTAVE_FORTRAN_DIAGNOSTIC_SUFFIXES:
+        marker = prefix + suffix.encode() + b"\0"
+        sanitized = sanitized.replace(marker, b"\0" * len(marker))
+    return sanitized
+
+
+def scan_forbidden_prefixes(
+    root: Path,
+    prefixes: Iterable[str],
+    *,
+    octave_source_prefix: str | None = None,
+) -> None:
     cleaned = [prefix for prefix in prefixes if prefix]
     if not cleaned:
         return
@@ -380,16 +434,16 @@ def scan_forbidden_prefixes(root: Path, prefixes: Iterable[str]) -> None:
             if any(prefix in dynamic for prefix in cleaned):
                 matches.append(path.relative_to(root).as_posix())
                 continue
-            # GNU Octave 11.3's liboctave shared object retains an inert
-            # build-tree string after libtool linking even when the configured
-            # prefix is installed directly and compiler source paths are
-            # remapped.  Loader-visible metadata is still checked above.
-            if path.name.startswith("liboctave.so."):
-                continue
         try:
             data = path.read_bytes()
         except OSError:
             continue
+        if is_elf(path):
+            data = strip_allowed_octave_fortran_diagnostics(
+                path,
+                data,
+                octave_source_prefix,
+            )
         if any(prefix.encode() in data for prefix in cleaned):
             matches.append(path.relative_to(root).as_posix())
     if matches:
@@ -674,7 +728,11 @@ def prepare(args: argparse.Namespace) -> int:
     audit_architecture(root)
     audit_runpaths(root)
     audit_dependency_resolution(root)
-    scan_forbidden_prefixes(root, args.forbidden_prefix)
+    scan_forbidden_prefixes(
+        root,
+        args.forbidden_prefix,
+        octave_source_prefix=args.octave_source_prefix,
+    )
     manifest = write_manifest(args, bundled)
     print("runtime_prepare=pass")
     print(f"runtime_files={manifest['payload_files']}")
@@ -715,6 +773,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--glibc-baseline", required=True)
     prepare_parser.add_argument("--configure-args-file", type=Path)
     prepare_parser.add_argument("--forbidden-prefix", action="append", default=[])
+    prepare_parser.add_argument("--octave-source-prefix")
     prepare_parser.set_defaults(func=prepare)
 
     verify_parser = subparsers.add_parser("verify", help="verify runtime tree and optional archive")

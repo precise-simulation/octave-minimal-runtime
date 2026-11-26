@@ -242,6 +242,7 @@ python3 "$runtime_tool" prepare \
   --build-image "$build_image" \
   --glibc-baseline "$glibc_baseline" \
   --configure-args-file "$build_dir/configure-args.txt" \
+  --octave-source-prefix "$source_dir" \
   --forbidden-prefix "$source_dir" \
   --forbidden-prefix "$build_dir"
 
