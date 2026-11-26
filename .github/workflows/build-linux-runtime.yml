@@ -404,7 +404,7 @@ jobs:
           path: artifacts/manylinux-runtime
           if-no-files-found: error
           compression-level: 0
-          retention-days: 1
+          retention-days: 7
 
       - name: Upload manylinux runtime build evidence
         if: ${{ always() }}
@@ -438,7 +438,7 @@ jobs:
             setup: ':'
             python: ''
             verify_manifest: '0'
-            check_host_ca: '0'
+            check_host_ca: '1'
           - target: ubuntu-20.04
             image: ubuntu:20.04@sha256:8feb4d8ca5354def3d8fce243717141ce31e2c428701f6682bd2fafe15388214
             setup: 'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends binutils ca-certificates python3'
@@ -603,8 +603,17 @@ jobs:
           compression-level: 0
           retention-days: 1
 
+      - name: Stop compatibility TLS fixture
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          pid_file="$RUNNER_TEMP/compat-tls/server.pid"
+          if [[ -s "$pid_file" ]]; then
+            kill "$(cat "$pid_file")" >/dev/null 2>&1 || true
+          fi
+
   manylinux-determinism:
-    if: ${{ inputs.compare_run_id != '' }}
+    if: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && inputs.compare_run_id != '' }}
     needs:
       - manylinux-runtime
       - manylinux-compatibility
@@ -625,6 +634,14 @@ jobs:
           COMPARE_RUN_ID: ${{ inputs.compare_run_id }}
         run: |
           set -euxo pipefail
+          metadata="$(gh run view "$COMPARE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json headSha,status,conclusion,workflowName,url)"
+          printf '%s\n' "$metadata" | tee "$RUNNER_TEMP/determinism-compare-run.json"
+          test "$(jq -r .headSha <<<"$metadata")" = "$GITHUB_SHA"
+          test "$(jq -r .status <<<"$metadata")" = completed
+          test "$(jq -r .conclusion <<<"$metadata")" = success
+          test "$(jq -r .workflowName <<<"$metadata")" = 'Build Linux runtime'
           mkdir -p "$RUNNER_TEMP/determinism/previous"
           gh run download "$COMPARE_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
@@ -641,6 +658,7 @@ jobs:
           previous="$RUNNER_TEMP/determinism/previous"
           evidence="$RUNNER_TEMP/determinism/evidence"
           mkdir -p "$evidence"
+          cp "$RUNNER_TEMP/determinism-compare-run.json" "$evidence/comparison-run.json"
 
           for directory in "$current" "$previous"; do
             (

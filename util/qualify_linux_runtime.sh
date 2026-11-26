@@ -105,10 +105,33 @@ env -i \
   "$launcher" --quiet --eval "$mex_eval"
 
 # The launcher must discover a supported target-host CA bundle when no explicit
-# curl CA override is present.  The real HTTPS probe below then supplies the
-# workflow-local test CA explicitly, keeping the network test deterministic.
+# curl CA override is present.  Temporarily append the workflow-local test CA to
+# that exact bundle so the real HTTPS request proves the default host-CA path.
 if [[ "$check_host_ca" -eq 1 ]]; then
-  host_ca_eval="ca=getenv('CURLOPT_CAINFO'); assert(~isempty(ca)); assert(exist(ca,'file')==2); disp(['LINUX_HOST_CA=' ca]);"
+  host_ca_bundle=""
+  for candidate in \
+    /etc/ssl/certs/ca-certificates.crt \
+    /etc/pki/tls/certs/ca-bundle.crt \
+    /etc/ssl/ca-bundle.pem
+  do
+    if [[ -r "$candidate" && -w "$candidate" ]]; then
+      host_ca_bundle="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$host_ca_bundle" ]]; then
+    printf 'error: no writable supported host CA bundle was found\n' >&2
+    exit 1
+  fi
+  cp "$host_ca_bundle" "$work_dir/host-ca-backup.pem"
+  restore_host_ca() {
+    cp "$work_dir/host-ca-backup.pem" "$host_ca_bundle"
+  }
+  trap restore_host_ca EXIT
+  printf '\n' >> "$host_ca_bundle"
+  cat "$https_ca" >> "$host_ca_bundle"
+
+  host_ca_eval="ca=getenv('CURLOPT_CAINFO'); assert(strcmp(ca,'$host_ca_bundle')); assert(exist(ca,'file')==2); disp(['LINUX_HOST_CA=' ca]);"
   env -i \
     HOME="$work_dir/home" \
     PATH="/usr/bin:/bin" \
@@ -118,12 +141,23 @@ if [[ "$check_host_ca" -eq 1 ]]; then
 fi
 
 https_eval="txt=urlread('$https_url'); assert(strcmp(strtrim(txt),'https-ok')); disp('LINUX_HTTPS_RUNTIME=pass');"
-env -i \
-  HOME="$work_dir/home" \
-  PATH="/usr/bin:/bin" \
-  LANG=C \
-  LC_ALL=C \
-  CURLOPT_CAINFO="$https_ca" \
-  "$launcher" --quiet --eval "$https_eval"
+if [[ "$check_host_ca" -eq 1 ]]; then
+  env -i \
+    HOME="$work_dir/home" \
+    PATH="/usr/bin:/bin" \
+    LANG=C \
+    LC_ALL=C \
+    "$launcher" --quiet --eval "$https_eval"
+  restore_host_ca
+  trap - EXIT
+else
+  env -i \
+    HOME="$work_dir/home" \
+    PATH="/usr/bin:/bin" \
+    LANG=C \
+    LC_ALL=C \
+    CURLOPT_CAINFO="$https_ca" \
+    "$launcher" --quiet --eval "$https_eval"
+fi
 
 printf 'qualification=pass\n'
