@@ -9,13 +9,17 @@ on:
     paths:
       - .github/workflows/build-linux-runtime.yml
       - util/build_octave_runtime_linux.sh
+      - util/build_manylinux_deps.sh
       - util/linux_runtime_tool.py
+      - util/manylinux-deps.lock
       - README.md
   pull_request:
     paths:
       - .github/workflows/build-linux-runtime.yml
       - util/build_octave_runtime_linux.sh
+      - util/build_manylinux_deps.sh
       - util/linux_runtime_tool.py
+      - util/manylinux-deps.lock
       - README.md
 
 permissions:
@@ -38,52 +42,6 @@ env:
   SOURCE_DATE_EPOCH: '1780272000'
 
 jobs:
-  manylinux-source-lock:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-
-    steps:
-      - name: Resolve immutable dependency source checksums
-        shell: bash
-        run: |
-          set -euxo pipefail
-          output="$RUNNER_TEMP/manylinux-source-lock"
-          mkdir -p "$output/downloads"
-
-          cat > "$output/sources.tsv" <<'EOF'
-          openblas	0.3.34	https://github.com/OpenMathLib/OpenBLAS/releases/download/v0.3.34/OpenBLAS-0.3.34.tar.gz
-          suitesparse	7.14.1	https://github.com/DrTimothyAldenDavis/SuiteSparse/archive/refs/tags/v7.14.1.tar.gz
-          arpack-ng	3.9.1	https://github.com/opencollab/arpack-ng/archive/refs/tags/3.9.1.tar.gz
-          fftw	3.3.10	https://www.fftw.org/fftw-3.3.10.tar.gz
-          hdf5	1.14.6	https://github.com/HDFGroup/hdf5/releases/download/hdf5_1.14.6/hdf5-1.14.6.tar.gz
-          qhull	8.0.2	https://github.com/qhull/qhull/archive/refs/tags/v8.0.2.tar.gz
-          zlib	1.3.2	https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.gz
-          openssl	3.0.22	https://github.com/openssl/openssl/releases/download/openssl-3.0.22/openssl-3.0.22.tar.gz
-          curl	8.23.0	https://github.com/curl/curl/releases/download/curl-8_23_0/curl-8.23.0.tar.xz
-          pcre2	10.49	https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.49/pcre2-10.49.tar.gz
-          ncurses	6.5	https://ftp.gnu.org/gnu/ncurses/ncurses-6.5.tar.gz
-          readline	8.2	https://ftp.gnu.org/gnu/readline/readline-8.2.tar.gz
-          libtool	2.4.7	https://ftp.gnu.org/gnu/libtool/libtool-2.4.7.tar.xz
-          rapidjson	1.1.0	https://github.com/Tencent/rapidjson/archive/refs/tags/v1.1.0.tar.gz
-          EOF
-
-          : > "$output/sha256.tsv"
-          while IFS=$'\t' read -r name version url; do
-            archive="$output/downloads/${name}-${version}.src"
-            curl --fail --location --retry 4 --output "$archive" "$url"
-            digest="$(sha256sum "$archive" | cut -d' ' -f1)"
-            printf '%s\t%s\t%s\t%s\n' "$name" "$version" "$digest" "$url" \
-              | tee -a "$output/sha256.tsv"
-          done < "$output/sources.tsv"
-
-      - name: Upload dependency source lock evidence
-        uses: actions/upload-artifact@v7
-        with:
-          name: featool-manylinux-dependency-source-lock
-          path: ${{ runner.temp }}/manylinux-source-lock/sha256.tsv
-          if-no-files-found: error
-          retention-days: 1
-
   manylinux-smoke:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -152,6 +110,100 @@ jobs:
           name: featool-octave-runtime-linux-x64-glibc217-smoke
           path: ${{ runner.temp }}/manylinux2014-smoke
           if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  manylinux-deps:
+    needs: manylinux-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out runtime builder
+        uses: actions/checkout@v7
+
+      - name: Download and verify pinned dependency sources
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sources="$RUNNER_TEMP/manylinux-deps-sources"
+          mkdir -p "$sources"
+          while IFS=$'\t' read -r name version filename digest url; do
+            [[ -z "$name" || "$name" == \#* ]] && continue
+            archive="$sources/$filename"
+            curl --fail --location --retry 4 --output "$archive" "$url"
+            printf '%s  %s\n' "$digest" "$archive" | sha256sum --check --strict
+          done < ./util/manylinux-deps.lock
+          printf 'MANYLINUX_DEPS_SOURCES=%s\n' "$sources" >> "$GITHUB_ENV"
+
+      - name: Build pinned dependency prefix in manylinux2014
+        shell: bash
+        run: |
+          set -euxo pipefail
+          prefix="$RUNNER_TEMP/featool-deps"
+          build_dir="$RUNNER_TEMP/manylinux-deps-build"
+          evidence="$RUNNER_TEMP/manylinux-deps-evidence"
+          mkdir -p "$prefix" "$build_dir" "$evidence"
+
+          docker pull "$MANYLINUX_IMAGE"
+          docker image inspect "$MANYLINUX_IMAGE" \
+            --format '{{json .RepoDigests}}' | tee "$evidence/image-repodigests.json"
+
+          docker run --rm \
+            --platform linux/amd64 \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --volume "$MANYLINUX_DEPS_SOURCES:/sources:ro" \
+            --volume "$prefix:/opt/featool-deps" \
+            --volume "$build_dir:/work" \
+            --volume "$evidence:/evidence" \
+            --env SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+            "$MANYLINUX_IMAGE" \
+            /bin/bash -lc '
+              set -eo pipefail
+              set +u
+              source /opt/rh/devtoolset-10/enable
+              set -u
+              bash /workspace/util/build_manylinux_deps.sh \
+                --source-dir /sources \
+                --lock-file /workspace/util/manylinux-deps.lock \
+                --prefix /opt/featool-deps \
+                --work-dir /work \
+                --evidence-dir /evidence
+            '
+
+          printf 'MANYLINUX_DEPS_PREFIX=%s\n' "$prefix" >> "$GITHUB_ENV"
+          printf 'MANYLINUX_DEPS_EVIDENCE=%s\n' "$evidence" >> "$GITHUB_ENV"
+
+      - name: Archive dependency prefix and evidence
+        shell: bash
+        run: |
+          set -euxo pipefail
+          output="$GITHUB_WORKSPACE/artifacts/manylinux-deps"
+          mkdir -p "$output"
+          archive="$output/featool-manylinux-deps-glibc217.tar.zst"
+
+          tar \
+            --sort=name \
+            --mtime="@$SOURCE_DATE_EPOCH" \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -C "$MANYLINUX_DEPS_PREFIX" \
+            -cf - . | zstd -19 -T0 -o "$archive"
+
+          sha256sum "$archive" > "$archive.sha256"
+          cp -a "$MANYLINUX_DEPS_EVIDENCE/." "$output/"
+          du -sh "$MANYLINUX_DEPS_PREFIX" "$archive"
+
+      - name: Upload manylinux dependency prefix evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: featool-manylinux-deps-glibc217
+          path: |
+            ${{ runner.temp }}/manylinux-deps-evidence
+            artifacts/manylinux-deps
+          if-no-files-found: warn
           compression-level: 0
           retention-days: 1
 

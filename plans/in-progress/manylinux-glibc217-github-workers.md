@@ -14,6 +14,7 @@ affected_files:
   - util/build_octave_runtime_linux.sh
   - util/linux_runtime_tool.py
   - util/build_manylinux_deps.sh
+  - util/manylinux-deps.lock
   - README.md
 ---
 
@@ -399,20 +400,28 @@ implementation increments:
   an ambient system copy, and copied-library provenance records the selected
   path, resolved source path, SHA-256, and search tier.
 
-The smoke job still needs a GitHub-hosted run before its acceptance items can be
-checked off.  The next implementation item is the pinned private dependency
-prefix builder in `util/build_manylinux_deps.sh`.
+Hosted run `45818617122` at commit `42eb743` passed the `manylinux-smoke` job on
+`ubuntu-24.04`.  The pinned image reported CentOS 7 with glibc 2.17, GCC/G++/
+GFortran 10.2.1 from `/opt/rh/devtoolset-10`, and GNU ld 2.35.  Build and
+qualification commands for this plan are run on GitHub-hosted Actions runners;
+local execution is not used as acceptance evidence.
+
+Hosted run `45819447121` at commit `e486a7f` resolved and recorded SHA-256 values
+for all 14 immutable dependency source archives before the private-prefix build
+was added.  These values are committed in `util/manylinux-deps.lock` and are
+verified again on the host before any archive is mounted into the build
+container.
 
 ## Acceptance checklist
 
-- [ ] manylinux image is pinned by digest.
-- [ ] outer GitHub job stays on `ubuntu-24.04`; modern Actions execute outside
+- [x] manylinux image is pinned by digest.
+- [x] outer GitHub job stays on `ubuntu-24.04`; modern Actions execute outside
       the glibc 2.17 container.
-- [ ] all downloaded source archives have repository-pinned SHA-256 values.
+- [x] all downloaded source archives have repository-pinned SHA-256 values.
 - [ ] dependency prefix is independent of Debian/Ubuntu include/library paths.
-- [ ] active GCC/G++/GFortran toolchain is recorded and verified before build.
+- [x] active GCC/G++/GFortran toolchain is recorded and verified before build.
 - [ ] compiler-runtime closure is selected from the intended toolchain.
-- [ ] glibc 2.17 host allowlist excludes `libmvec.so.1`.
+- [x] glibc 2.17 host allowlist excludes `libmvec.so.1`.
 - [ ] every delivered ELF object requires `GLIBC_2.17` or older.
 - [ ] all non-host `DT_NEEDED` dependencies resolve inside the runtime.
 - [ ] sparse, ARPACK, FFTW, HDF5, Qhull, JSON, and MEX probes pass.
