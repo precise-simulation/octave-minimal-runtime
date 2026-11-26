@@ -369,12 +369,21 @@ if [[ "$validate" -eq 1 ]]; then
 
   tls_probe_dir="$build_dir/tls-probe"
   mkdir -p "$tls_probe_dir"
-  openssl_command="$dependency_prefix/bin/openssl"
-  if [[ -z "$dependency_prefix" ]] || [[ ! -x "$openssl_command" ]]; then
-    printf 'error: HTTPS validation requires the private OpenSSL command\n' >&2
-    exit 1
+  if [[ -n "$dependency_prefix" ]]; then
+    openssl_command="$dependency_prefix/bin/openssl"
+    openssl_env="$dependency_prefix/lib:$dependency_prefix/lib64:${LD_LIBRARY_PATH:-}"
+    if [[ ! -x "$openssl_command" ]]; then
+      printf 'error: HTTPS validation requires the private OpenSSL command: %s\n' "$openssl_command" >&2
+      exit 1
+    fi
+  else
+    openssl_command="$(command -v openssl || true)"
+    openssl_env="${LD_LIBRARY_PATH:-}"
+    if [[ -z "$openssl_command" ]]; then
+      printf 'error: HTTPS validation requires an OpenSSL command\n' >&2
+      exit 1
+    fi
   fi
-  openssl_env="$dependency_prefix/lib:$dependency_prefix/lib64:${LD_LIBRARY_PATH:-}"
   cat > "$tls_probe_dir/openssl.cnf" <<'EOF'
 [req]
 distinguished_name=req_dn
