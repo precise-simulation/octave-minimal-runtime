@@ -21,6 +21,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   OCTAVE_VERSION: 11.3.0
   OCTAVE_ARCHIVE: octave-11.3.0.tar.xz
