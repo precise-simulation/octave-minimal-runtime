@@ -230,7 +230,7 @@ if [[ "$validate" -eq 1 ]]; then
   runtime_launcher="$destination/bin/featool-octave"
   octave_probe_dir="${probe_dir//\\//}"
   octave_probe_dir="${octave_probe_dir//\'/\'\'}"
-  eval_code="assert(strcmp(OCTAVE_VERSION,'11.3.0')); A=sparse([4 -1;-1 4]); b=[1;2]; x=A\\b; assert(norm(A*x-b)<1e-12); e=eigs(sparse(diag(1:5)),1); assert(abs(e-5)<1e-8); f=fft([1 2 3 4]); assert(numel(f)==4); fn=[tempname() '.h5']; q=magic(3); save('-hdf5',fn,'q'); clear q; load(fn); assert(isequal(q,magic(3))); unlink(fn); assert(~isempty(jsonencode(struct('a',1)))); disp('LINUX_NUMERICAL_RUNTIME=pass');"
+  eval_code="assert(strcmp(OCTAVE_VERSION,'11.3.0')); A=sparse([4 -1;-1 4]); b=[1;2]; x=A\\b; assert(norm(A*x-b)<1e-12); e=eigs(sparse(diag(1:5)),1); assert(abs(e-5)<1e-8); f=fft([1 2 3 4]); assert(numel(f)==4); p=[0 0;1 0;0 1;1 1]; k=convhull(p(:,1),p(:,2)); assert(numel(k)>=4); t=delaunay(p(:,1),p(:,2)); assert(rows(t)>=2); fn=[tempname() '.h5']; q=magic(3); save('-hdf5',fn,'q'); clear q; load(fn); assert(isequal(q,magic(3))); unlink(fn); fn=tempname(); fid=fopen(fn,'w'); fputs(fid,'curl-ok'); fclose(fid); txt=urlread(['file://' fn]); unlink(fn); assert(strcmp(strtrim(txt),'curl-ok')); assert(~isempty(jsonencode(struct('a',1)))); disp('LINUX_NUMERICAL_RUNTIME=pass');"
   env -i \
     HOME="$validation_home" \
     PATH="/usr/bin:/bin" \

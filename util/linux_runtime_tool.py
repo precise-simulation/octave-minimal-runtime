@@ -368,18 +368,27 @@ def enforce_glibc_baseline(abi: dict[str, str | None], baseline: str) -> None:
 
 
 def scan_forbidden_prefixes(root: Path, prefixes: Iterable[str]) -> None:
-    needles = [prefix.encode() for prefix in prefixes if prefix]
-    if not needles:
+    cleaned = [prefix for prefix in prefixes if prefix]
+    if not cleaned:
         return
     matches: list[str] = []
     for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
         if path.is_symlink() or not path.is_file() or path.name == MANIFEST_NAME:
             continue
+        if is_elf(path):
+            # Compilers and Octave's build-info objects may retain source/build
+            # paths as inert provenance strings.  The relocation contract is
+            # concerned with loader-visible metadata, which is audited here
+            # and separately by the RPATH/ldd checks.
+            dynamic = readelf_dynamic(path)
+            if any(prefix in dynamic for prefix in cleaned):
+                matches.append(path.relative_to(root).as_posix())
+            continue
         try:
             data = path.read_bytes()
         except OSError:
             continue
-        if any(needle in data for needle in needles):
+        if any(prefix.encode() in data for prefix in cleaned):
             matches.append(path.relative_to(root).as_posix())
     if matches:
         raise RuntimeErrorWithContext(

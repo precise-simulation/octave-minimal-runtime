@@ -60,10 +60,10 @@ The current checkpoint is intentionally headless: Qt/native Octave graphics and
 the production FEATool/PyRuntime integration remain later qualification steps.
 
 `util/build_octave_runtime_linux.sh` configures a shared-library Octave build
-with BLAS/LAPACK, SuiteSparse, ARPACK, FFTW, HDF5, and MEX support available
-from the pinned build environment while disabling Java, documentation, Qt,
-FLTK, OpenGL, and ImageMagick integration. It installs into an isolated staging
-prefix, removes development-only payload, and creates a relative launcher that
+with BLAS/LAPACK, SuiteSparse, ARPACK, FFTW, HDF5, Qhull, libcurl, and MEX
+support available from the pinned build environment while disabling Java,
+documentation, Qt, FLTK, OpenGL, and ImageMagick integration. It installs into
+an isolated staging prefix, removes development-only payload, and creates a relative launcher that
 sets the packaged Octave home, supplies a deterministic child `PATH`, and
 disables Octave startup files without requiring a system Octave installation.
 
@@ -82,11 +82,12 @@ checkpoint baseline rather than the final public compatibility claim. A later
 compatibility lane will test the preferred glibc 2.17 floor or narrow the claim
 to the oldest fully qualified baseline.
 
-The workflow validates sparse linear algebra, ARPACK, FFTW, HDF5, JSON support,
-and an externally compiled MEX probe under a minimal environment. It then emits
-a metadata-preserving `tar.zst`, extracts it to a different absolute path, and
-reruns manifest, ELF, dependency, and relocation smoke checks on the extracted
-tree before uploading the archive and build evidence.
+The workflow validates sparse linear algebra, ARPACK, FFTW, HDF5, Qhull
+geometry, libcurl URL I/O, JSON support, and an externally compiled MEX probe
+under a minimal environment. It then emits a metadata-preserving `tar.zst`,
+extracts it to a different absolute path, and reruns manifest, ELF, dependency,
+and relocation smoke checks on the extracted tree before uploading the archive
+and build evidence.
 
 ## Authenticated FEATool qualification
 
