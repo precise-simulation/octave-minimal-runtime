@@ -44,7 +44,7 @@ for required_name in source_dir lock_file prefix work_dir evidence_dir; do
   fi
 done
 
-for command_name in bash cmake gcc g++ gfortran getconf ld make objdump perl pkg-config readelf realpath sha256sum tar xz; do
+for command_name in bash cmake gcc g++ gfortran getconf ld make objdump patchelf perl pkg-config readelf realpath sha256sum tar xz; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     printf 'error: required command is missing: %s\n' "$command_name" >&2
     exit 1
@@ -506,6 +506,29 @@ for name in "${dependencies[@]}"; do
 done
 
 find "$prefix" -type f \( -name '*.a' -o -name '*.la' \) -delete
+
+# Some Autotools projects install helper executables with the configure-time
+# prefix embedded as RPATH.  The dependency prefix is archived on the Ubuntu
+# host and later remounted at /opt/featool-deps for the Octave build, so those
+# absolute paths would make the intermediate artifact location-dependent.  The
+# Octave builder already supplies the prefix libraries through LD_LIBRARY_PATH;
+# remove only loader paths that point back into this build prefix or work tree.
+: > "$evidence_dir/runpath-normalization.tsv"
+while IFS= read -r -d '' candidate; do
+  if ! readelf -h "$candidate" >/dev/null 2>&1; then
+    continue
+  fi
+  runpath="$(patchelf --print-rpath "$candidate" 2>/dev/null || true)"
+  if [[ -z "$runpath" ]]; then
+    continue
+  fi
+  if [[ "$runpath" != *"$prefix"* && "$runpath" != *"$work_dir"* ]]; then
+    continue
+  fi
+  relative="${candidate#"$prefix"/}"
+  printf '%s\t%s\n' "$relative" "$runpath" >> "$evidence_dir/runpath-normalization.tsv"
+  patchelf --remove-rpath "$candidate"
+done < <(find "$prefix" -type f -print0)
 
 : > "$evidence_dir/elf-abi.tsv"
 : > "$evidence_dir/elf-needed.tsv"
