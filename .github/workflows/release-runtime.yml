@@ -107,7 +107,7 @@ jobs:
               --clobber
           else
             extra=()
-            if [[ "$tag" == *-* ]]; then
+            if [[ "$tag" =~ -(alpha|beta|rc|test)([.-]|$) ]]; then
               extra+=(--prerelease)
             fi
             gh release create "$tag" "${assets[@]}" \
