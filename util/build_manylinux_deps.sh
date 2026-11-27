@@ -371,6 +371,38 @@ build_hdf5() {
   )
   record_command hdf5 "${command[@]}"
   "${command[@]}"
+
+  # HDF5 embeds libhdf5.settings into the shared library.  Its generated
+  # configure timestamp, container hostname, and runner kernel make otherwise
+  # identical hosted builds differ, so replace only those volatile fields with
+  # stable build-contract values before the generated settings are compiled.
+  local settings_file="$build/libhdf5.settings"
+  if [[ ! -f "$settings_file" ]]; then
+    printf 'error: HDF5 configure did not produce settings: %s\n' "$settings_file" >&2
+    exit 1
+  fi
+  HDF5_SETTINGS_FILE="$settings_file" perl -e '
+    use strict;
+    use warnings;
+
+    my $path = $ENV{HDF5_SETTINGS_FILE};
+    open my $input, "<", $path or die "cannot read $path: $!\n";
+    local $/;
+    my $text = <$input>;
+    close $input or die "cannot close $path after read: $!\n";
+
+    my $count = 0;
+    $count += ($text =~ s/^[ \t]*Configured on:.*$/                  Configured on: SOURCE_DATE_EPOCH=$ENV{SOURCE_DATE_EPOCH}/m);
+    $count += ($text =~ s/^[ \t]*Configured by:.*$/                  Configured by: featool-manylinux/m);
+    $count += ($text =~ s/^[ \t]*Uname information:.*$/              Uname information: manylinux2014_x86_64/m);
+    die "expected exactly three volatile HDF5 settings fields, replaced $count\n" unless $count == 3;
+
+    open my $output, ">", $path or die "cannot write $path: $!\n";
+    print {$output} $text;
+    close $output or die "cannot close $path after write: $!\n";
+  '
+  cp "$settings_file" "$evidence_dir/hdf5-lib-settings.txt"
+
   make -j"$jobs"
   make install
   popd >/dev/null

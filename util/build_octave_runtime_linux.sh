@@ -68,7 +68,7 @@ for required_name in source_dir build_dir destination source_archive source_sha2
   fi
 done
 
-for command_name in bash make gcc g++ gfortran getconf patchelf readelf objdump ldconfig ldd; do
+for command_name in bash make gcc g++ gfortran getconf patchelf readelf objdump ldconfig ldd strip; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     printf 'error: required command is missing: %s\n' "$command_name" >&2
     exit 1
@@ -282,6 +282,10 @@ if [[ ! -f "$probe_dir/octave_runtime_mex_probe.mex" ]]; then
   printf 'error: MEX probe was not produced\n' >&2
   exit 1
 fi
+# mkoctfile links through a randomly named temporary C source and leaves that
+# filename in the static symbol table.  The runtime loader only needs dynamic
+# symbols, so discard static symbols to make the qualification MEX reproducible.
+strip --strip-all "$probe_dir/octave_runtime_mex_probe.mex"
 
 cp -a "$install_root/." "$destination/"
 rm -rf "$install_root"
