@@ -372,36 +372,61 @@ build_hdf5() {
   record_command hdf5 "${command[@]}"
   "${command[@]}"
 
-  # HDF5 embeds libhdf5.settings into the shared library.  Its generated
-  # configure timestamp, container hostname, and runner kernel make otherwise
-  # identical hosted builds differ, so replace only those volatile fields with
-  # stable build-contract values before the generated settings are compiled.
-  local settings_file="$build/libhdf5.settings"
-  if [[ ! -f "$settings_file" ]]; then
-    printf 'error: HDF5 configure did not produce settings: %s\n' "$settings_file" >&2
-    exit 1
-  fi
-  HDF5_SETTINGS_FILE="$settings_file" perl -e '
+  # HDF5 generates both installed settings text and a C source that embeds the
+  # same configure timestamp, container hostname, and runner kernel in
+  # libhdf5.so.  Normalize only those volatile fields before compilation.
+  local settings_file="$build/src/libhdf5.settings"
+  local build_settings_source="$build/src/H5build_settings.c"
+  for generated_file in "$settings_file" "$build_settings_source"; do
+    if [[ ! -f "$generated_file" ]]; then
+      printf 'error: HDF5 configure did not produce settings file: %s\n' "$generated_file" >&2
+      exit 1
+    fi
+  done
+  HDF5_SETTINGS_FILE="$settings_file" \
+    HDF5_BUILD_SETTINGS_SOURCE="$build_settings_source" \
+    perl -e '
     use strict;
     use warnings;
 
-    my $path = $ENV{HDF5_SETTINGS_FILE};
-    open my $input, "<", $path or die "cannot read $path: $!\n";
-    local $/;
-    my $text = <$input>;
-    close $input or die "cannot close $path after read: $!\n";
+    sub read_file {
+      my ($path) = @_;
+      open my $input, "<", $path or die "cannot read $path: $!\n";
+      local $/;
+      my $text = <$input>;
+      close $input or die "cannot close $path after read: $!\n";
+      return $text;
+    }
 
-    my $count = 0;
-    $count += ($text =~ s/^[ \t]*Configured on:.*$/                  Configured on: SOURCE_DATE_EPOCH=$ENV{SOURCE_DATE_EPOCH}/m);
-    $count += ($text =~ s/^[ \t]*Configured by:.*$/                  Configured by: featool-manylinux/m);
-    $count += ($text =~ s/^[ \t]*Uname information:.*$/              Uname information: manylinux2014_x86_64/m);
-    die "expected exactly three volatile HDF5 settings fields, replaced $count\n" unless $count == 3;
+    sub write_file {
+      my ($path, $text) = @_;
+      open my $output, ">", $path or die "cannot write $path: $!\n";
+      print {$output} $text;
+      close $output or die "cannot close $path after write: $!\n";
+    }
 
-    open my $output, ">", $path or die "cannot write $path: $!\n";
-    print {$output} $text;
-    close $output or die "cannot close $path after write: $!\n";
+    my $settings_path = $ENV{HDF5_SETTINGS_FILE};
+    my $settings = read_file($settings_path);
+    my $settings_count = 0;
+    $settings_count += ($settings =~ s/^[ \t]*Configured on:.*$/                  Configured on: SOURCE_DATE_EPOCH=$ENV{SOURCE_DATE_EPOCH}/m);
+    $settings_count += ($settings =~ s/^[ \t]*Configured by:.*$/                  Configured by: featool-manylinux/m);
+    $settings_count += ($settings =~ s/^[ \t]*Uname information:.*$/              Uname information: manylinux2014_x86_64/m);
+    die "expected three volatile fields in $settings_path, replaced $settings_count\n"
+      unless $settings_count == 3;
+    write_file($settings_path, $settings);
+
+    my $source_path = $ENV{HDF5_BUILD_SETTINGS_SOURCE};
+    my $source = read_file($source_path);
+    my $source_count = 0;
+    $source_count += ($source =~ s/^[ \t]*"[ \t]*Configured on:.*\\n"$/    "                  Configured on: SOURCE_DATE_EPOCH=$ENV{SOURCE_DATE_EPOCH}\\n"/m);
+    $source_count += ($source =~ s/^[ \t]*"[ \t]*Configured by:.*\\n"$/    "                  Configured by: featool-manylinux\\n"/m);
+    $source_count += ($source =~ s/^[ \t]*"[ \t]*Uname information:.*\\n"$/    "              Uname information: manylinux2014_x86_64\\n"/m);
+    die "expected three volatile fields in $source_path, replaced $source_count\n"
+      unless $source_count == 3;
+    write_file($source_path, $source);
   '
   cp "$settings_file" "$evidence_dir/hdf5-lib-settings.txt"
+  cp "$build_settings_source" "$evidence_dir/hdf5-build-settings.c"
 
   make -j"$jobs"
   make install
