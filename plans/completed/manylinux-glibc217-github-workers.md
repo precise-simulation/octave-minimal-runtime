@@ -8,7 +8,7 @@ depends_on:
   - plans/in-progress/stripped-octave-runtime-featool.md
 children: []
 affected_files:
-  - plans/in-progress/manylinux-glibc217-github-workers.md
+  - plans/completed/manylinux-glibc217-github-workers.md
   - .github/workflows/build-linux-runtime.yml
   - .github/workflows/release-runtime.yml
   - util/build_octave_runtime_linux.sh
@@ -447,6 +447,27 @@ release assets again produced byte-identical archive, checksum, and manifest
 files.  The manylinux lane is therefore promoted to the canonical Linux
 artifact producer while the Ubuntu 22.04 lane remains available under an
 explicit diagnostic artifact name.
+
+Final promotion completed in PR #3 (`b697821`) with the manylinux artifact as
+the canonical `featool-octave-runtime-linux-x64` producer and the Ubuntu 22.04
+checkpoint retained as `featool-octave-runtime-linux-x64-ubuntu22-diagnostic`.
+Hosted branch run `46015814264` and tag-driven test release run `46018413342`
+built commit `32951dd` independently and produced byte-identical canonical
+Linux archives, checksum files, manifests, and configure output.  Test release
+`v11.3.0-2-glibc217-test.2` was downloaded again and matched the CI artifacts
+byte-for-byte.
+
+PR #4 (`54db157`) corrected production/prerelease tag classification without
+changing runtime inputs.  Post-merge Linux run `46023558225` passed the full
+compatibility matrix and reproduced the same archive and manifest hashes.
+Production tag `v11.3.0-2` then completed release run `46023961859` successfully
+for Windows and Linux, including CentOS 7, manylinux2014, Ubuntu 20.04, Ubuntu
+22.04, and Ubuntu 24.04 qualification.  The published release is a normal
+(non-prerelease) release.  Independent redownload verified all three public
+runtime archive checksums; the Linux archive remains
+`966355be571211996ef30d7429dd0d1dbe1e2194c1a072f52e1ef1835cd023be` and the
+manifest remains
+`a583cfff5bb7ce6f0d13c29b2ed893b8d3e70d05dd4010c073469462c1736690`.
 
 ## Acceptance checklist
 
