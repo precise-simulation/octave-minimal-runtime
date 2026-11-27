@@ -389,12 +389,13 @@ def stage_dependency_closure(
                 considered.append(f"dependency-prefix:{selected}")
             else:
                 considered.extend(f"dependency-prefix:{directory / soname}" for directory in dependency_dirs)
-                selected, compiler_name, compiler_considered = compiler_runtime_library(soname)
-                considered.extend(f"compiler-runtime:{item}" for item in compiler_considered)
-                if selected is not None:
-                    tier = "compiler-runtime"
-                    compiler = compiler_name or ""
-                else:
+                if is_compiler_runtime(soname):
+                    selected, compiler_name, compiler_considered = compiler_runtime_library(soname)
+                    considered.extend(f"compiler-runtime:{item}" for item in compiler_considered)
+                    if selected is not None:
+                        tier = "compiler-runtime"
+                        compiler = compiler_name or ""
+                if selected is None:
                     selected = library_in_directories(soname, system_dirs)
                     tier = "manylinux-system"
                     if selected is not None:
