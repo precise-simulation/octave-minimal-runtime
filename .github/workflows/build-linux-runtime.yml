@@ -48,7 +48,7 @@ concurrency:
 env:
   OCTAVE_VERSION: 11.3.0
   OCTAVE_ARCHIVE: octave-11.3.0.tar.xz
-  OCTAVE_URL: https://ftp.gnu.org/gnu/octave/octave-11.3.0.tar.xz
+  OCTAVE_URL: https://ftpmirror.gnu.org/octave/octave-11.3.0.tar.xz
   OCTAVE_SHA256: 2b80f3149b2de6d1f4f2fcb4fe6515a17eb363b52111bf57b90f37bf6f5e12e1
   BUILD_IMAGE: ubuntu:22.04@sha256:b682e31336cc8e0a73ed91ab32b7a95e32591c5ff09994490a20accf9b3600f9
   GLIBC_BASELINE: '2.35'
