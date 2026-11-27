@@ -1,10 +1,11 @@
 # Minimal GNU Octave runtime for FEATool
 
-This repository builds the application-private GNU Octave runtime used by the
-FEATool source deployment path on Windows. The runtime is derived from the
-official GNU Octave 11.3.0 Windows x64 distribution and removes compiler,
-development, documentation, bundled package, and GUI files that are not needed
-by the qualified FEATool runtime.
+This repository builds application-private GNU Octave runtimes used by the
+FEATool source deployment path. The qualified Windows runtime is derived from
+the official GNU Octave 11.3.0 Windows x64 distribution. The Linux runtime is
+built from the pinned GNU Octave 11.3.0 source release and is being qualified as
+a relocatable x86-64/glibc artifact. Both paths remove compiler, development,
+documentation, and GUI content that is not needed by their runtime profile.
 
 The canonical GitHub-hosted build produces two profiles:
 
@@ -47,6 +48,64 @@ for headless and
 for Qt. The builder removes Octave's generated bundled-package registry because
 its only cross-run difference is a wall-clock timestamp and all referenced
 bundled packages are already pruned from the runtime.
+
+## Linux headless source build
+
+`.github/workflows/build-linux-runtime.yml` is the first Linux x86-64 hosted
+checkpoint. It runs on `ubuntu-24.04` inside a digest-pinned Ubuntu 22.04
+container and builds GNU Octave 11.3.0 from the pinned source archive with
+SHA-256
+`2b80f3149b2de6d1f4f2fcb4fe6515a17eb363b52111bf57b90f37bf6f5e12e1`.
+The Ubuntu package repositories remain mutable; each run records the exact
+resolved `dpkg` package versions in the manifest and uploaded build evidence.
+The current checkpoint is intentionally headless: Qt/native Octave graphics and
+the production FEATool/PyRuntime integration remain later qualification steps.
+
+`util/build_octave_runtime_linux.sh` configures a shared-library Octave build
+with BLAS/LAPACK, SuiteSparse, ARPACK, FFTW, HDF5, Qhull, libcurl, and MEX
+support from the declared hosted build dependencies while disabling Java,
+documentation, Qt, FLTK, OpenGL, and ImageMagick integration. It installs into
+the configured private prefix inside the disposable build container, copies out
+the runtime tree, removes development-only payload, and creates a
+relative launcher that
+sets the packaged Octave home, supplies a deterministic child `PATH`, and
+disables Octave startup files without requiring a system Octave installation.
+
+`util/linux_runtime_tool.py` derives the packaged ELF closure from `DT_NEEDED`
+entries. Non-glibc dependencies are copied into `lib/runtime-deps`; Octave-owned
+libraries are exposed there through relative symlinks. Every packaged ELF object
+receives an `$ORIGIN`-relative search path. Verification rejects unresolved
+dependencies, non-relative RPATH/RUNPATH entries, external symlink targets,
+non-x86-64 ELF objects, source/build paths in loader-visible ELF metadata, and
+source/build paths in every other delivered file. The only raw-byte exception is
+an enumerated set of 30 GNU Fortran diagnostic source filenames embedded in GNU
+Octave 11.3's `liboctave.so.13.0.2`; any other source-prefix occurrence and every
+build-prefix occurrence still fail the audit.
+
+The Linux manifest records file types, modes, regular-file sizes/SHA-256 values,
+symlink targets, build/compiler provenance, exact resolved `dpkg` package
+versions, the host-library allowlist, and the maximum required `GLIBC`,
+`GLIBCXX`, `CXXABI`, and `GCC` symbol versions. The
+first hosted lane uses glibc 2.35 as its selected build baseline; that is a
+checkpoint baseline rather than the final public compatibility claim. A later
+compatibility lane will test the preferred glibc 2.17 floor or narrow the claim
+to the oldest fully qualified baseline.
+
+The workflow validates sparse linear algebra, ARPACK, FFTW, HDF5, Qhull
+geometry, libcurl URL I/O, JSON support, and an externally compiled MEX probe
+under a minimal environment. It then emits a metadata-preserving `tar.zst`,
+extracts it to a different absolute path, and reruns manifest, ELF, dependency,
+and relocation smoke checks on the extracted tree before uploading the archive
+and build evidence.
+
+Hosted run `45781365018` passed this complete Linux path at commit `95bbb4d`.
+The qualified headless payload contains 1,182 files and 102,752,311 bytes
+(about 98.0 MiB); its `tar.zst` is 25,847,102 bytes with SHA-256
+`c57caa5936362e238d820a57e7f89b17727183729900622d746182375c130988`.
+The runtime closure contains 61 bundled non-host dependency SONAMEs and the
+manifest records 259 installed `dpkg` package/version entries. Maximum required
+symbol versions are `GLIBC_2.35`, `GLIBCXX_3.4.30`, `CXXABI_1.3.9`, and
+`GCC_4.3.0`.
 
 ## Authenticated FEATool qualification
 

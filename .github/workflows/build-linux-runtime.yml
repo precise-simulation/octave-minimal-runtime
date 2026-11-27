@@ -1,0 +1,879 @@
+name: Build Linux runtime
+
+on:
+  workflow_call:
+    inputs:
+      compare_run_id:
+        description: Optional prior successful run ID for hosted determinism comparison
+        required: false
+        type: string
+        default: ''
+  workflow_dispatch:
+    inputs:
+      compare_run_id:
+        description: Optional prior successful run ID for hosted determinism comparison
+        required: false
+        type: string
+        default: ''
+  push:
+    branches:
+      - main
+      - 'feat/**'
+    paths:
+      - .github/workflows/build-linux-runtime.yml
+      - util/build_octave_runtime_linux.sh
+      - util/build_manylinux_deps.sh
+      - util/linux_runtime_tool.py
+      - util/qualify_linux_runtime.sh
+      - util/manylinux-deps.lock
+      - README.md
+  pull_request:
+    paths:
+      - .github/workflows/build-linux-runtime.yml
+      - util/build_octave_runtime_linux.sh
+      - util/build_manylinux_deps.sh
+      - util/linux_runtime_tool.py
+      - util/qualify_linux_runtime.sh
+      - util/manylinux-deps.lock
+      - README.md
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  OCTAVE_VERSION: 11.3.0
+  OCTAVE_ARCHIVE: octave-11.3.0.tar.xz
+  OCTAVE_URL: https://ftpmirror.gnu.org/octave/octave-11.3.0.tar.xz
+  OCTAVE_SHA256: 2b80f3149b2de6d1f4f2fcb4fe6515a17eb363b52111bf57b90f37bf6f5e12e1
+  BUILD_IMAGE: ubuntu:22.04@sha256:b682e31336cc8e0a73ed91ab32b7a95e32591c5ff09994490a20accf9b3600f9
+  GLIBC_BASELINE: '2.35'
+  MANYLINUX_IMAGE: quay.io/pypa/manylinux2014_x86_64@sha256:8a79ff36ce155d8f242dc8013d73c5e8bbe937defb15de7d7afb342c1ab537f4
+  MANYLINUX_GLIBC_BASELINE: '2.17'
+  SOURCE_DATE_EPOCH: '1780272000'
+
+jobs:
+  manylinux-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out runtime builder
+        uses: actions/checkout@v7
+
+      - name: Record hosted runner baseline
+        shell: bash
+        run: |
+          set -euxo pipefail
+          evidence="$RUNNER_TEMP/manylinux2014-smoke"
+          mkdir -p "$evidence"
+          {
+            printf 'runner_os=%s\n' "$RUNNER_OS"
+            printf 'runner_arch=%s\n' "$RUNNER_ARCH"
+            printf 'image_os=%s\n' "${ImageOS:-unknown}"
+            printf 'image_version=%s\n' "${ImageVersion:-unknown}"
+            printf 'kernel=%s\n' "$(uname -srvmo)"
+            printf 'manylinux_image=%s\n' "$MANYLINUX_IMAGE"
+          } | tee "$evidence/host.txt"
+          printf 'MANYLINUX_EVIDENCE=%s\n' "$evidence" >> "$GITHUB_ENV"
+
+      - name: Verify pinned manylinux2014 toolchain baseline
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker pull "$MANYLINUX_IMAGE"
+          docker image inspect "$MANYLINUX_IMAGE" \
+            --format '{{json .RepoDigests}}' | tee "$MANYLINUX_EVIDENCE/image-repodigests.json"
+
+          docker run --rm \
+            --platform linux/amd64 \
+            --volume "$MANYLINUX_EVIDENCE:/evidence" \
+            --env EXPECTED_GLIBC="$MANYLINUX_GLIBC_BASELINE" \
+            "$MANYLINUX_IMAGE" \
+            /bin/bash -lc '
+              set -euxo pipefail
+              set +u
+              source /opt/rh/devtoolset-10/enable
+              set -u
+              glibc_version="$(getconf GNU_LIBC_VERSION)"
+              glibc_version="${glibc_version#glibc }"
+              gcc_version="$(gcc -dumpfullversion -dumpversion)"
+              test "$glibc_version" = "$EXPECTED_GLIBC"
+              test "${gcc_version%%.*}" = "10"
+              {
+                cat /etc/os-release
+                printf "glibc=%s\n" "$glibc_version"
+                ldd --version | sed -n "1p"
+                gcc --version | sed -n "1p"
+                g++ --version | sed -n "1p"
+                gfortran --version | sed -n "1p"
+                ld --version | sed -n "1p"
+                printf "gcc_path=%s\n" "$(command -v gcc)"
+                printf "gxx_path=%s\n" "$(command -v g++)"
+                printf "gfortran_path=%s\n" "$(command -v gfortran)"
+              } | tee /evidence/container.txt
+            '
+
+      - name: Upload manylinux2014 smoke evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: featool-octave-runtime-linux-x64-glibc217-smoke
+          path: ${{ runner.temp }}/manylinux2014-smoke
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  manylinux-deps:
+    needs: manylinux-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out runtime builder
+        uses: actions/checkout@v7
+
+      - name: Download and verify pinned dependency sources
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sources="$RUNNER_TEMP/manylinux-deps-sources"
+          mkdir -p "$sources"
+          while IFS=$'\t' read -r name version filename digest url; do
+            [[ -z "$name" || "$name" == \#* ]] && continue
+            archive="$sources/$filename"
+            curl --fail --location --retry 4 --output "$archive" "$url"
+            printf '%s  %s\n' "$digest" "$archive" | sha256sum --check --strict
+          done < ./util/manylinux-deps.lock
+          printf 'MANYLINUX_DEPS_SOURCES=%s\n' "$sources" >> "$GITHUB_ENV"
+
+      - name: Build pinned dependency prefix in manylinux2014
+        shell: bash
+        run: |
+          set -euxo pipefail
+          prefix="$RUNNER_TEMP/featool-deps"
+          build_dir="$RUNNER_TEMP/manylinux-deps-build"
+          evidence="$RUNNER_TEMP/manylinux-deps-evidence"
+          mkdir -p "$prefix" "$build_dir" "$evidence"
+
+          docker pull "$MANYLINUX_IMAGE"
+          docker image inspect "$MANYLINUX_IMAGE" \
+            --format '{{json .RepoDigests}}' | tee "$evidence/image-repodigests.json"
+
+          docker run --rm \
+            --platform linux/amd64 \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --volume "$MANYLINUX_DEPS_SOURCES:/sources:ro" \
+            --volume "$prefix:/opt/featool-deps" \
+            --volume "$build_dir:/work" \
+            --volume "$evidence:/evidence" \
+            --env SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+            "$MANYLINUX_IMAGE" \
+            /bin/bash -lc '
+              set -eo pipefail
+              yum install -y \
+                perl-IPC-Cmd-0.80-4.el7 \
+                perl-Time-Piece-1.20.1-299.el7_9
+              {
+                rpm -q perl
+                rpm -q perl-IPC-Cmd
+                rpm -q perl-Time-Piece
+              } | tee /evidence/build-tools.txt
+              set +u
+              source /opt/rh/devtoolset-10/enable
+              set -u
+              bash /workspace/util/build_manylinux_deps.sh \
+                --source-dir /sources \
+                --lock-file /workspace/util/manylinux-deps.lock \
+                --prefix /opt/featool-deps \
+                --work-dir /work \
+                --evidence-dir /evidence
+            '
+
+          printf 'MANYLINUX_DEPS_PREFIX=%s\n' "$prefix" >> "$GITHUB_ENV"
+          printf 'MANYLINUX_DEPS_EVIDENCE=%s\n' "$evidence" >> "$GITHUB_ENV"
+
+      - name: Archive dependency prefix and evidence
+        shell: bash
+        run: |
+          set -euxo pipefail
+          output="$GITHUB_WORKSPACE/artifacts/manylinux-deps"
+          mkdir -p "$output"
+          archive="$output/featool-manylinux-deps-glibc217.tar.zst"
+
+          tar \
+            --sort=name \
+            --mtime="@$SOURCE_DATE_EPOCH" \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -C "$MANYLINUX_DEPS_PREFIX" \
+            -cf - . | zstd -19 -T0 -o "$archive"
+
+          (
+            cd "$output"
+            sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256"
+          )
+          cp -a "$MANYLINUX_DEPS_EVIDENCE/." "$output/"
+          du -sh "$MANYLINUX_DEPS_PREFIX" "$archive"
+
+      - name: Upload manylinux dependency prefix
+        uses: actions/upload-artifact@v7
+        with:
+          name: featool-manylinux-deps-glibc217-prefix
+          path: |
+            artifacts/manylinux-deps/featool-manylinux-deps-glibc217.tar.zst
+            artifacts/manylinux-deps/featool-manylinux-deps-glibc217.tar.zst.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload manylinux dependency build evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: featool-manylinux-deps-glibc217-evidence
+          path: |
+            ${{ runner.temp }}/manylinux-deps-evidence
+            artifacts/manylinux-deps/*.txt
+            artifacts/manylinux-deps/*.tsv
+            artifacts/manylinux-deps/*.sha256
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 1
+
+  manylinux-runtime:
+    needs: manylinux-deps
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Check out runtime builder
+        uses: actions/checkout@v7
+
+      - name: Download pinned dependency prefix
+        uses: actions/download-artifact@v8
+        with:
+          name: featool-manylinux-deps-glibc217-prefix
+          path: ${{ runner.temp }}/manylinux-deps-artifact
+
+      - name: Verify and extract dependency prefix
+        shell: bash
+        run: |
+          set -euxo pipefail
+          artifact_dir="$RUNNER_TEMP/manylinux-deps-artifact"
+          archive="$artifact_dir/featool-manylinux-deps-glibc217.tar.zst"
+          (
+            cd "$artifact_dir"
+            sha256sum --check --strict featool-manylinux-deps-glibc217.tar.zst.sha256
+          )
+          prefix="$RUNNER_TEMP/featool-deps"
+          mkdir -p "$prefix"
+          tar --zstd -xf "$archive" -C "$prefix"
+          printf 'MANYLINUX_DEPS_PREFIX=%s\n' "$prefix" >> "$GITHUB_ENV"
+
+      - name: Download and verify GNU Octave source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          archive="$RUNNER_TEMP/$OCTAVE_ARCHIVE"
+          curl --fail --location --retry 4 --output "$archive" "$OCTAVE_URL"
+          printf '%s  %s\n' "$OCTAVE_SHA256" "$archive" | sha256sum --check --strict
+
+          source_dir="$RUNNER_TEMP/octave-$OCTAVE_VERSION-manylinux-source"
+          mkdir -p "$source_dir"
+          tar -xJf "$archive" -C "$source_dir" --strip-components=1
+          printf 'MANYLINUX_OCTAVE_SOURCE=%s\n' "$source_dir" >> "$GITHUB_ENV"
+
+      - name: Build and validate Octave in manylinux2014
+        shell: bash
+        run: |
+          set -euxo pipefail
+          build_root="$RUNNER_TEMP/manylinux-octave-build"
+          runtime_root="$RUNNER_TEMP/featool-octave-linux-x64-glibc217"
+          evidence="$RUNNER_TEMP/manylinux-runtime-evidence"
+          mkdir -p "$build_root" "$runtime_root" "$evidence"
+
+          docker pull "$MANYLINUX_IMAGE"
+          docker image inspect "$MANYLINUX_IMAGE" \
+            --format '{{json .RepoDigests}}' | tee "$evidence/image-repodigests.json"
+
+          docker run --rm \
+            --platform linux/amd64 \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --volume "$MANYLINUX_OCTAVE_SOURCE:/octave-source:ro" \
+            --volume "$MANYLINUX_DEPS_PREFIX:/opt/featool-deps:ro" \
+            --volume "$build_root:/work" \
+            --volume "$runtime_root:/output" \
+            --volume "$evidence:/evidence" \
+            --env SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+            --env OCTAVE_ARCHIVE="$OCTAVE_ARCHIVE" \
+            --env OCTAVE_SHA256="$OCTAVE_SHA256" \
+            --env MANYLINUX_IMAGE="$MANYLINUX_IMAGE" \
+            --env MANYLINUX_GLIBC_BASELINE="$MANYLINUX_GLIBC_BASELINE" \
+            "$MANYLINUX_IMAGE" \
+            /bin/bash -lc '
+              set -eo pipefail
+              set +u
+              source /opt/rh/devtoolset-10/enable
+              set -u
+              python=/opt/python/cp311-cp311/bin/python
+              test -x "$python"
+              {
+                cat /etc/os-release
+                getconf GNU_LIBC_VERSION
+                gcc --version | sed -n "1p"
+                g++ --version | sed -n "1p"
+                gfortran --version | sed -n "1p"
+                ld --version | sed -n "1p"
+                patchelf --version
+                "$python" --version
+              } | tee /evidence/toolchain.txt
+              bash /workspace/util/build_octave_runtime_linux.sh \
+                --source-dir /octave-source \
+                --build-dir /work/build \
+                --destination /output/runtime \
+                --source-archive "$OCTAVE_ARCHIVE" \
+                --source-sha256 "$OCTAVE_SHA256" \
+                --build-image "$MANYLINUX_IMAGE" \
+                --glibc-baseline "$MANYLINUX_GLIBC_BASELINE" \
+                --dependency-prefix /opt/featool-deps \
+                --python "$python" \
+                --expected-build-glibc "$MANYLINUX_GLIBC_BASELINE" \
+                --expected-gcc-major 10 \
+                --validate
+            '
+
+          printf 'MANYLINUX_RUNTIME=%s\n' "$runtime_root/runtime" >> "$GITHUB_ENV"
+          printf 'MANYLINUX_RUNTIME_BUILD=%s\n' "$build_root/build" >> "$GITHUB_ENV"
+          printf 'MANYLINUX_RUNTIME_EVIDENCE=%s\n' "$evidence" >> "$GITHUB_ENV"
+
+      - name: Create deterministic manylinux runtime archive
+        shell: bash
+        run: |
+          set -euxo pipefail
+          output="$GITHUB_WORKSPACE/artifacts/manylinux-runtime"
+          mkdir -p "$output"
+          archive="$output/featool-octave-runtime-linux-x64.tar.zst"
+
+          tar \
+            --sort=name \
+            --mtime="@$SOURCE_DATE_EPOCH" \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -C "$MANYLINUX_RUNTIME" \
+            -cf - . | zstd -19 -T0 -o "$archive"
+
+          (
+            cd "$output"
+            sha256sum featool-octave-runtime-linux-x64.tar.zst \
+              > featool-octave-runtime-linux-x64.tar.zst.sha256
+          )
+          cp "$MANYLINUX_RUNTIME/runtime-manifest.json" \
+            "$output/featool-octave-runtime-linux-x64.manifest.json"
+          cp "$MANYLINUX_RUNTIME_BUILD/configure.out" \
+            "$output/octave-11.3.0-linux-configure.txt"
+          {
+            printf 'runner_image_os=%s\n' "${ImageOS:-unknown}"
+            printf 'runner_image_version=%s\n' "${ImageVersion:-unknown}"
+            printf 'source_date_epoch=%s\n' "$SOURCE_DATE_EPOCH"
+            tar --version | sed -n '1p'
+            zstd --version
+            sha256sum "$archive"
+            python3 - "$MANYLINUX_RUNTIME/runtime-manifest.json" <<'PY'
+          import json
+          import sys
+
+          manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+          print(f"payload_files={manifest['payload_files']}")
+          print(f"payload_bytes={manifest['payload_bytes']}")
+          print("abi_max_required=" + json.dumps(manifest["abi_max_required"], sort_keys=True))
+          PY
+          } | tee "$MANYLINUX_RUNTIME_EVIDENCE/archive.txt"
+          du -sh "$MANYLINUX_RUNTIME" "$archive"
+
+      - name: Upload glibc 2.17 Linux runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: featool-octave-runtime-linux-x64-glibc217
+          path: artifacts/manylinux-runtime
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload manylinux runtime build evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: featool-octave-runtime-linux-x64-glibc217-build-evidence
+          path: |
+            ${{ runner.temp }}/manylinux-runtime-evidence
+            ${{ runner.temp }}/manylinux-octave-build/build/configure.out
+            ${{ runner.temp }}/manylinux-octave-build/build/configure-args.txt
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 1
+
+  manylinux-compatibility:
+    needs: manylinux-runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: manylinux2014-floor
+            image: quay.io/pypa/manylinux2014_x86_64@sha256:8a79ff36ce155d8f242dc8013d73c5e8bbe937defb15de7d7afb342c1ab537f4
+            setup: ':'
+            python: /opt/python/cp311-cp311/bin/python
+            verify_manifest: '1'
+            check_host_ca: '1'
+          - target: centos7-clean-floor
+            image: centos:7@sha256:be65f488b7764ad3638f236b7b515b3678369a5124c47b8d32916d6487418ea4
+            setup: ':'
+            python: ''
+            verify_manifest: '0'
+            check_host_ca: '1'
+          - target: ubuntu-20.04
+            image: ubuntu:20.04@sha256:8feb4d8ca5354def3d8fce243717141ce31e2c428701f6682bd2fafe15388214
+            setup: 'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends binutils ca-certificates python3'
+            python: /usr/bin/python3
+            verify_manifest: '1'
+            check_host_ca: '1'
+          - target: ubuntu-22.04
+            image: ubuntu:22.04@sha256:b000e69a50ff940390233025e7a337fb8469b509e2334fa4d018ac30f3e18cdb
+            setup: 'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends binutils ca-certificates python3'
+            python: /usr/bin/python3
+            verify_manifest: '1'
+            check_host_ca: '1'
+          - target: ubuntu-24.04
+            image: ubuntu:24.04@sha256:562111b88caa79c71391c0c4d3c2114a7d5c35915c20561fd893cb1e07929e6b
+            setup: 'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends binutils ca-certificates python3'
+            python: /usr/bin/python3
+            verify_manifest: '1'
+            check_host_ca: '1'
+
+    steps:
+      - name: Check out qualification harness
+        uses: actions/checkout@v7
+
+      - name: Download exact glibc 2.17 runtime artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: featool-octave-runtime-linux-x64-glibc217
+          path: ${{ runner.temp }}/manylinux-runtime-artifact
+
+      - name: Verify archive and prepare deterministic TLS fixture
+        shell: bash
+        run: |
+          set -euxo pipefail
+          artifact_dir="$RUNNER_TEMP/manylinux-runtime-artifact"
+          archive="$artifact_dir/featool-octave-runtime-linux-x64.tar.zst"
+          (
+            cd "$artifact_dir"
+            sha256sum --check --strict featool-octave-runtime-linux-x64.tar.zst.sha256
+          )
+          zstd -d -c "$archive" > "$RUNNER_TEMP/featool-runtime.tar"
+
+          tls="$RUNNER_TEMP/compat-tls"
+          mkdir -p "$tls"
+          openssl req -x509 -newkey rsa:2048 -nodes \
+            -keyout "$tls/ca.key" -out "$tls/ca.crt" \
+            -subj '/CN=FEATool Runtime Test CA' -days 1
+          openssl req -newkey rsa:2048 -nodes \
+            -keyout "$tls/server.key" -out "$tls/server.csr" \
+            -subj '/CN=host.docker.internal'
+          cat > "$tls/server.ext" <<'EOF'
+          subjectAltName=DNS:host.docker.internal
+          extendedKeyUsage=serverAuth
+          EOF
+          openssl x509 -req \
+            -in "$tls/server.csr" \
+            -CA "$tls/ca.crt" \
+            -CAkey "$tls/ca.key" \
+            -CAcreateserial \
+            -out "$tls/server.crt" \
+            -days 1 \
+            -extfile "$tls/server.ext"
+
+          cat > "$tls/server.py" <<'PY'
+          import http.server
+          import ssl
+
+
+          class Handler(http.server.BaseHTTPRequestHandler):
+              def do_GET(self):
+                  body = b"https-ok\n"
+                  self.send_response(200)
+                  self.send_header("Content-Type", "text/plain")
+                  self.send_header("Content-Length", str(len(body)))
+                  self.end_headers()
+                  self.wfile.write(body)
+
+              def log_message(self, format, *args):
+                  pass
+
+
+          server = http.server.ThreadingHTTPServer(("0.0.0.0", 38443), Handler)
+          context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+          context.load_cert_chain("server.crt", "server.key")
+          server.socket = context.wrap_socket(server.socket, server_side=True)
+          server.serve_forever()
+          PY
+          (
+            cd "$tls"
+            python3 server.py > server.log 2>&1 &
+            printf '%s\n' "$!" > server.pid
+          )
+          sleep 1
+          kill -0 "$(cat "$tls/server.pid")"
+
+      - name: Qualify exact archive on ${{ matrix.target }}
+        shell: bash
+        env:
+          TARGET_IMAGE: ${{ matrix.image }}
+          TARGET_SETUP: ${{ matrix.setup }}
+          TARGET_PYTHON: ${{ matrix.python }}
+          VERIFY_MANIFEST: ${{ matrix.verify_manifest }}
+          CHECK_HOST_CA: ${{ matrix.check_host_ca }}
+        run: |
+          set -euxo pipefail
+          evidence="$RUNNER_TEMP/compat-evidence/${{ matrix.target }}"
+          mkdir -p "$evidence"
+          archive_sha="$(sha256sum "$RUNNER_TEMP/manylinux-runtime-artifact/featool-octave-runtime-linux-x64.tar.zst" | awk '{print $1}')"
+
+          docker pull "$TARGET_IMAGE"
+          docker image inspect "$TARGET_IMAGE" --format '{{json .RepoDigests}}' \
+            > "$evidence/image-repodigests.json"
+          printf 'target=%s\nimage=%s\narchive_sha256=%s\n' \
+            '${{ matrix.target }}' "$TARGET_IMAGE" "$archive_sha" \
+            > "$evidence/summary.txt"
+
+          docker run --rm \
+            --platform linux/amd64 \
+            --add-host host.docker.internal:host-gateway \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --volume "$RUNNER_TEMP/featool-runtime.tar:/runtime.tar:ro" \
+            --volume "$RUNNER_TEMP/compat-tls:/qualification:ro" \
+            --volume "$evidence:/evidence" \
+            --env TARGET_SETUP \
+            --env TARGET_PYTHON \
+            --env VERIFY_MANIFEST \
+            --env CHECK_HOST_CA \
+            "$TARGET_IMAGE" \
+            /bin/bash -lc '
+              set -euo pipefail
+              eval "$TARGET_SETUP"
+              mkdir -p /opt/compat-runtime
+              tar -xf /runtime.tar -C /opt/compat-runtime
+              {
+                cat /etc/os-release || true
+                getconf GNU_LIBC_VERSION
+                ldd --version | sed -n "1p"
+              } | tee /evidence/target.txt
+
+              args=(
+                --runtime-root /opt/compat-runtime
+                --work-dir /tmp/featool-qualification
+                --https-url https://host.docker.internal:38443/
+                --https-ca /qualification/ca.crt
+              )
+              if [[ "$VERIFY_MANIFEST" == 1 ]]; then
+                args+=(--runtime-tool /workspace/util/linux_runtime_tool.py --python "$TARGET_PYTHON")
+              fi
+              if [[ "$CHECK_HOST_CA" != 1 ]]; then
+                args+=(--skip-host-ca-check)
+              fi
+              bash /workspace/util/qualify_linux_runtime.sh "${args[@]}" \
+                2>&1 | tee /evidence/qualification.log
+            '
+
+      - name: Upload compatibility evidence for ${{ matrix.target }}
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: featool-octave-runtime-linux-x64-glibc217-${{ matrix.target }}-evidence
+          path: ${{ runner.temp }}/compat-evidence/${{ matrix.target }}
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 1
+
+      - name: Stop compatibility TLS fixture
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          pid_file="$RUNNER_TEMP/compat-tls/server.pid"
+          if [[ -s "$pid_file" ]]; then
+            kill "$(cat "$pid_file")" >/dev/null 2>&1 || true
+          fi
+
+  manylinux-determinism:
+    if: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && inputs.compare_run_id != '' }}
+    needs:
+      - manylinux-runtime
+      - manylinux-compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Download current glibc 2.17 runtime
+        uses: actions/download-artifact@v8
+        with:
+          name: featool-octave-runtime-linux-x64-glibc217
+          path: ${{ runner.temp }}/determinism/current
+
+      - name: Download comparison run glibc 2.17 runtime
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPARE_RUN_ID: ${{ inputs.compare_run_id }}
+        run: |
+          set -euxo pipefail
+          metadata="$(gh run view "$COMPARE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json headSha,status,conclusion,workflowName,url)"
+          printf '%s\n' "$metadata" | tee "$RUNNER_TEMP/determinism-compare-run.json"
+          test "$(jq -r .headSha <<<"$metadata")" = "$GITHUB_SHA"
+          test "$(jq -r .status <<<"$metadata")" = completed
+          test "$(jq -r .conclusion <<<"$metadata")" = success
+          test "$(jq -r .workflowName <<<"$metadata")" = 'Build Linux runtime'
+          mkdir -p "$RUNNER_TEMP/determinism/previous"
+          gh run download "$COMPARE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name featool-octave-runtime-linux-x64-glibc217 \
+            --dir "$RUNNER_TEMP/determinism/previous"
+
+      - name: Compare fresh hosted build outputs
+        shell: bash
+        env:
+          COMPARE_RUN_ID: ${{ inputs.compare_run_id }}
+        run: |
+          set -euxo pipefail
+          current="$RUNNER_TEMP/determinism/current"
+          previous="$RUNNER_TEMP/determinism/previous"
+          evidence="$RUNNER_TEMP/determinism/evidence"
+          mkdir -p "$evidence"
+          cp "$RUNNER_TEMP/determinism-compare-run.json" "$evidence/comparison-run.json"
+
+          for directory in "$current" "$previous"; do
+            (
+              cd "$directory"
+              sha256sum --check --strict featool-octave-runtime-linux-x64.tar.zst.sha256
+            )
+          done
+
+          current_sha="$(sha256sum "$current/featool-octave-runtime-linux-x64.tar.zst" | awk '{print $1}')"
+          previous_sha="$(sha256sum "$previous/featool-octave-runtime-linux-x64.tar.zst" | awk '{print $1}')"
+          printf 'current_run=%s\ncomparison_run=%s\ncurrent_sha256=%s\ncomparison_sha256=%s\n' \
+            "$GITHUB_RUN_ID" "$COMPARE_RUN_ID" "$current_sha" "$previous_sha" \
+            | tee "$evidence/comparison.txt"
+          test "$current_sha" = "$previous_sha"
+          cmp \
+            "$current/featool-octave-runtime-linux-x64.manifest.json" \
+            "$previous/featool-octave-runtime-linux-x64.manifest.json"
+          printf 'archive_identity=pass\nmanifest_identity=pass\n' \
+            | tee -a "$evidence/comparison.txt"
+
+      - name: Upload determinism evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: featool-octave-runtime-linux-x64-glibc217-determinism-evidence
+          path: ${{ runner.temp }}/determinism/evidence
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 7
+
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    container:
+      image: ubuntu:22.04@sha256:b682e31336cc8e0a73ed91ab32b7a95e32591c5ff09994490a20accf9b3600f9
+
+    steps:
+      - name: Install build and runtime-audit dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            binutils \
+            bison \
+            build-essential \
+            ca-certificates \
+            curl \
+            file \
+            flex \
+            gfortran \
+            git \
+            libarpack2-dev \
+            libblas-dev \
+            libcurl4-openssl-dev \
+            libfftw3-dev \
+            libhdf5-dev \
+            liblapack-dev \
+            libltdl-dev \
+            libpcre2-dev \
+            libqhull-dev \
+            libreadline-dev \
+            libsuitesparse-dev \
+            libtool \
+            patchelf \
+            perl \
+            pkg-config \
+            python3 \
+            rapidjson-dev \
+            strace \
+            xz-utils \
+            zlib1g-dev \
+            zstd
+          dpkg-query -W -f='${binary:Package}\t${Version}\n' | LC_ALL=C sort > "$RUNNER_TEMP/linux-build-packages.txt"
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Check out runtime builder
+        uses: actions/checkout@v7
+
+      - name: Record pinned build baseline
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cat /etc/os-release
+          ldd --version | sed -n '1p'
+          gcc --version | sed -n '1p'
+          g++ --version | sed -n '1p'
+          gfortran --version | sed -n '1p'
+          ld --version | sed -n '1p'
+
+      - name: Download and verify GNU Octave source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          archive="$RUNNER_TEMP/$OCTAVE_ARCHIVE"
+          curl --fail --location --retry 4 --output "$archive" "$OCTAVE_URL"
+          printf '%s  %s\n' "$OCTAVE_SHA256" "$archive" | sha256sum --check --strict
+
+          source_dir="$RUNNER_TEMP/octave-$OCTAVE_VERSION-source"
+          mkdir -p "$source_dir"
+          tar -xJf "$archive" -C "$source_dir" --strip-components=1
+          printf 'OCTAVE_SOURCE=%s\n' "$source_dir" >> "$GITHUB_ENV"
+
+      - name: Build and validate headless Linux runtime
+        shell: bash
+        run: |
+          set -euxo pipefail
+          build_dir="$RUNNER_TEMP/octave-linux-build"
+          runtime_dir="$RUNNER_TEMP/featool-octave-linux-x64"
+          bash ./util/build_octave_runtime_linux.sh \
+            --source-dir "$OCTAVE_SOURCE" \
+            --build-dir "$build_dir" \
+            --destination "$runtime_dir" \
+            --source-archive "$OCTAVE_ARCHIVE" \
+            --source-sha256 "$OCTAVE_SHA256" \
+            --build-image "$BUILD_IMAGE" \
+            --glibc-baseline "$GLIBC_BASELINE" \
+            --validate
+          printf 'LINUX_RUNTIME=%s\n' "$runtime_dir" >> "$GITHUB_ENV"
+          printf 'LINUX_BUILD_DIR=%s\n' "$build_dir" >> "$GITHUB_ENV"
+
+      - name: Verify runtime manifest and relocation
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 ./util/linux_runtime_tool.py verify \
+            --runtime-root "$LINUX_RUNTIME" \
+            --expected-profile headless-cli-featool \
+            --smoke
+
+      - name: Create metadata-preserving runtime archive
+        shell: bash
+        run: |
+          set -euxo pipefail
+          output="$GITHUB_WORKSPACE/artifacts"
+          mkdir -p "$output"
+          archive="$output/featool-octave-runtime-linux-x64.tar.zst"
+
+          tar \
+            --sort=name \
+            --mtime="@$SOURCE_DATE_EPOCH" \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -C "$LINUX_RUNTIME" \
+            -cf - . | zstd -19 -T0 -o "$archive"
+
+          (
+            cd "$output"
+            sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256"
+          )
+          cp "$LINUX_RUNTIME/runtime-manifest.json" \
+            "$output/featool-octave-runtime-linux-x64.manifest.json"
+          cp "$LINUX_BUILD_DIR/configure.out" \
+            "$output/octave-11.3.0-linux-configure.txt"
+          cp "$RUNNER_TEMP/linux-build-packages.txt" \
+            "$output/linux-build-packages.txt"
+
+          python3 ./util/linux_runtime_tool.py verify \
+            --runtime-root "$LINUX_RUNTIME" \
+            --expected-profile headless-cli-featool \
+            --archive "$archive" \
+            --smoke
+
+          du -sh "$LINUX_RUNTIME" "$archive"
+          cat "$LINUX_RUNTIME/runtime-manifest.json" | python3 -c \
+            "import json,sys; m=json.load(sys.stdin); print('payload_files='+str(m['payload_files'])); print('payload_bytes='+str(m['payload_bytes'])); print('abi_max_required='+json.dumps(m['abi_max_required'],sort_keys=True))"
+
+      - name: Upload Linux runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: featool-octave-runtime-linux-x64
+          path: |
+            artifacts/featool-octave-runtime-linux-x64.tar.zst
+            artifacts/featool-octave-runtime-linux-x64.tar.zst.sha256
+            artifacts/featool-octave-runtime-linux-x64.manifest.json
+            artifacts/octave-11.3.0-linux-configure.txt
+            artifacts/linux-build-packages.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      - name: Delete superseded Linux runtime artifacts
+        if: ${{ success() && github.event_name != 'pull_request' }}
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const artifactName = 'featool-octave-runtime-linux-x64';
+            const currentRunId = Number(context.runId);
+            const currentBranch = context.ref.replace(/^refs\/heads\//, '');
+            const artifacts = await github.paginate(
+              github.rest.actions.listArtifactsForRepo,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: artifactName,
+                per_page: 100,
+              },
+            );
+
+            const superseded = artifacts.filter(
+              (artifact) =>
+                artifact.workflow_run?.id !== currentRunId &&
+                artifact.workflow_run?.head_branch === currentBranch,
+            );
+
+            core.info(
+              `Deleting ${superseded.length} superseded ${artifactName} artifact(s) from ${currentBranch}`,
+            );
+            for (const artifact of superseded) {
+              core.info(`Deleting artifact ${artifact.id} from run ${artifact.workflow_run?.id ?? 'unknown'}`);
+              await github.rest.actions.deleteArtifact({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                artifact_id: artifact.id,
+              });
+            }
