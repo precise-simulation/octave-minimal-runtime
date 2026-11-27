@@ -657,6 +657,31 @@ def strip_allowed_octave_fortran_diagnostics(
     return sanitized
 
 
+def forbidden_prefix_context(data: bytes, prefix: str) -> str:
+    needle = prefix.encode()
+    offset = data.find(needle)
+    if offset < 0:
+        return ""
+
+    lower = max(0, offset - 192)
+    upper = min(len(data), offset + len(needle) + 384)
+    nul_before = data.rfind(b"\0", lower, offset)
+    if nul_before >= 0:
+        lower = nul_before + 1
+    nul_after = data.find(b"\0", offset + len(needle), upper)
+    if nul_after >= 0:
+        upper = nul_after
+
+    raw = data[lower:upper]
+    rendered = "".join(
+        chr(byte) if 32 <= byte <= 126 else f"\\x{byte:02x}"
+        for byte in raw
+    )
+    if len(rendered) > 480:
+        rendered = rendered[:477] + "..."
+    return rendered
+
+
 def scan_forbidden_prefixes(
     root: Path,
     prefixes: Iterable[str],
@@ -670,10 +695,18 @@ def scan_forbidden_prefixes(
     for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
         if path.is_symlink() or not path.is_file() or path.name == MANIFEST_NAME:
             continue
+        relative = path.relative_to(root).as_posix()
         if is_elf(path):
             dynamic = readelf_dynamic(path)
-            if any(prefix in dynamic for prefix in cleaned):
-                matches.append(path.relative_to(root).as_posix())
+            dynamic_match = next((prefix for prefix in cleaned if prefix in dynamic), None)
+            if dynamic_match is not None:
+                dynamic_line = next(
+                    (line.strip() for line in dynamic.splitlines() if dynamic_match in line),
+                    "<matching dynamic entry unavailable>",
+                )
+                matches.append(
+                    f"{relative}: dynamic metadata contains {dynamic_match!r}: {dynamic_line}"
+                )
                 continue
         try:
             data = path.read_bytes()
@@ -685,11 +718,15 @@ def scan_forbidden_prefixes(
                 data,
                 octave_source_prefix,
             )
-        if any(prefix.encode() in data for prefix in cleaned):
-            matches.append(path.relative_to(root).as_posix())
+        raw_match = next((prefix for prefix in cleaned if prefix.encode() in data), None)
+        if raw_match is not None:
+            context = forbidden_prefix_context(data, raw_match)
+            matches.append(
+                f"{relative}: raw content contains {raw_match!r}: {context!r}"
+            )
     if matches:
         raise RuntimeErrorWithContext(
-            "runtime contains references to build/source paths: " + ", ".join(matches[:40])
+            "runtime contains references to build/source paths:\n" + "\n".join(matches[:40])
         )
 
 

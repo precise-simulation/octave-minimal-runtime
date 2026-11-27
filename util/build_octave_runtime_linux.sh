@@ -160,7 +160,13 @@ configure_args=(
 printf '%s\n' "${configure_args[@]}" > "$build_dir/configure-args.txt"
 
 configure_flags="-O2 -g0 -fPIC"
-compile_flags="$configure_flags -ffile-prefix-map=$source_dir=/usr/src/octave-$OCTAVE_VERSION -ffile-prefix-map=$build_dir=/usr/src/octave-build"
+compile_flags="$configure_flags \
+-ffile-prefix-map=$source_dir=/usr/src/octave-$OCTAVE_VERSION \
+-fmacro-prefix-map=$source_dir=/usr/src/octave-$OCTAVE_VERSION \
+-fdebug-prefix-map=$source_dir=/usr/src/octave-$OCTAVE_VERSION \
+-ffile-prefix-map=$build_dir=/usr/src/octave-build \
+-fmacro-prefix-map=$build_dir=/usr/src/octave-build \
+-fdebug-prefix-map=$build_dir=/usr/src/octave-build"
 export CFLAGS="$configure_flags"
 export CXXFLAGS="$configure_flags"
 export FFLAGS="$configure_flags"
