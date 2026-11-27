@@ -118,7 +118,7 @@ while IFS=$'\t' read -r name version filename digest url; do
 done < "$lock_file"
 
 dependencies=(
-  zlib openssl ncurses readline pcre2 hdf5 qhull libtool rapidjson
+  zlib openssl ncurses readline pcre2 hdf5 qhull libtool rapidjson fast-float
   openblas fftw suitesparse arpack-ng curl
 )
 
@@ -439,6 +439,14 @@ build_rapidjson() {
   record_command rapidjson cp -a include/rapidjson "$prefix/include/"
 }
 
+build_fast_float() {
+  local src
+  src="$(extract_source fast-float)"
+  mkdir -p "$prefix/include"
+  cp -a "$src/include/fast_float" "$prefix/include/"
+  record_command fast-float cp -a include/fast_float "$prefix/include/"
+}
+
 build_curl() {
   local src
   src="$(extract_source curl)"
@@ -495,6 +503,7 @@ build_one() {
     qhull) build_qhull ;;
     libtool) build_libtool ;;
     rapidjson) build_rapidjson ;;
+    fast-float) build_fast_float ;;
     curl) build_curl ;;
     *) printf 'error: no builder for dependency: %s\n' "$name" >&2; return 1 ;;
   esac

@@ -13,3 +13,4 @@ ncurses	6.5	ncurses-6.5.tar.gz	136d91bc269a9a5785e5f9e980bc76ab57428f604ce3e5a5a
 readline	8.2	readline-8.2.tar.gz	3feb7171f16a84ee82ca18a36d7b9be109a52c04f492a053331d7d1095007c35	https://ftp.gnu.org/gnu/readline/readline-8.2.tar.gz
 libtool	2.4.7	libtool-2.4.7.tar.xz	4f7f217f057ce655ff22559ad221a0fd8ef84ad1fc5fcb6990cecc333aa1635d	https://ftp.gnu.org/gnu/libtool/libtool-2.4.7.tar.xz
 rapidjson	1.1.0	rapidjson-1.1.0.tar.gz	bf7ced29704a1e696fbccf2a2b4ea068e7774fa37f6d7dd4039d0787f8bed98e	https://github.com/Tencent/rapidjson/archive/refs/tags/v1.1.0.tar.gz
+fast-float	8.4.0	fast_float-517e6b8e008341fc4ebf80cc709d8b51610a888e.tar.gz	c1ac22fc47b7d22ed2101331c87c1092e42bf01a07274f50bbad29ecf87a8460	https://github.com/fastfloat/fast_float/archive/517e6b8e008341fc4ebf80cc709d8b51610a888e.tar.gz
