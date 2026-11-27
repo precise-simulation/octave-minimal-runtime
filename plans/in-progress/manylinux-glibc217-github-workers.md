@@ -429,27 +429,46 @@ OpenSSL build-tool assumptions and the CentOS 7 ncurses fallback-tool mismatch;
 build evidence was uploaded for each failed attempt.  No local native build is
 used to substitute for these runner results.
 
+## Promotion evidence (2026-11-27)
+
+Hosted qualification completed on commit `817c3f9` with baseline run
+`45990891046` and fresh comparison run `45995008548`.  The comparison
+recorded `archive_identity=pass` and `manifest_identity=pass`; the canonical
+archive SHA-256 is
+`966355be571211996ef30d7429dd0d1dbe1e2194c1a072f52e1ef1835cd023be`.
+The exact archive passed CentOS 7, manylinux2014, Ubuntu 20.04, Ubuntu 22.04,
+and Ubuntu 24.04 qualification.
+
+PR #2 merged the qualified implementation to `main` as `de005edd`, and
+post-merge run `46006976017` repeated the full compatibility matrix
+successfully.  Test prerelease `v11.3.0-2-glibc217-test.1` published that
+post-merge Linux archive under the unchanged public filename; downloading the
+release assets again produced byte-identical archive, checksum, and manifest
+files.  The manylinux lane is therefore promoted to the canonical Linux
+artifact producer while the Ubuntu 22.04 lane remains available under an
+explicit diagnostic artifact name.
+
 ## Acceptance checklist
 
 - [x] manylinux image is pinned by digest.
 - [x] outer GitHub job stays on `ubuntu-24.04`; modern Actions execute outside
       the glibc 2.17 container.
 - [x] all downloaded source archives have repository-pinned SHA-256 values.
-- [ ] dependency prefix is independent of Debian/Ubuntu include/library paths.
+- [x] dependency prefix is independent of Debian/Ubuntu include/library paths.
 - [x] active GCC/G++/GFortran toolchain is recorded and verified before build.
-- [ ] compiler-runtime closure is selected from the intended toolchain.
+- [x] compiler-runtime closure is selected from the intended toolchain.
 - [x] glibc 2.17 host allowlist excludes `libmvec.so.1`.
-- [ ] every delivered ELF object requires `GLIBC_2.17` or older.
-- [ ] all non-host `DT_NEEDED` dependencies resolve inside the runtime.
-- [ ] sparse, ARPACK, FFTW, HDF5, Qhull, JSON, and MEX probes pass.
-- [ ] real HTTPS/TLS probe passes under the documented CA trust model.
-- [ ] clean glibc 2.17 extraction/relocation test passes.
-- [ ] Ubuntu 20.04, 22.04, and 24.04 compatibility tests pass using the same
+- [x] every delivered ELF object requires `GLIBC_2.17` or older.
+- [x] all non-host `DT_NEEDED` dependencies resolve inside the runtime.
+- [x] sparse, ARPACK, FFTW, HDF5, Qhull, JSON, and MEX probes pass.
+- [x] real HTTPS/TLS probe passes under the documented CA trust model.
+- [x] clean glibc 2.17 extraction/relocation test passes.
+- [x] Ubuntu 20.04, 22.04, and 24.04 compatibility tests pass using the same
       archive.
-- [ ] archive is deterministic across two fresh hosted builds.
-- [ ] build evidence contains source locks, toolchain identity, dependency
+- [x] archive is deterministic across two fresh hosted builds.
+- [x] build evidence contains source locks, toolchain identity, dependency
       provenance, ABI maxima, manifest, and archive SHA-256.
-- [ ] release workflow consumes the glibc 2.17 artifact without changing the
+- [x] release workflow consumes the glibc 2.17 artifact without changing the
       public archive filename.
 
 ## Non-goals for this plan
