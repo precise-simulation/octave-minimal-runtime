@@ -124,6 +124,25 @@ if [[ ! -x "$source_dir/configure" ]]; then
   exit 1
 fi
 
+# Configure through a stable source-tree alias.  Autoconf records the source
+# auxiliary directory in fallback tool commands such as "build-aux/missing
+# flex", and Octave embeds those configured build variables in liboctinterp.
+# Keep the real source path for the forbidden-prefix audit while ensuring any
+# configured source references use the same deterministic prefix as compiler
+# file-prefix mapping.
+canonical_source_dir="/usr/src/octave-$OCTAVE_VERSION"
+if [[ -e "$canonical_source_dir" ]] || [[ -L "$canonical_source_dir" ]]; then
+  canonical_source_target="$(realpath "$canonical_source_dir" 2>/dev/null || true)"
+  if [[ "$canonical_source_target" != "$source_dir" ]]; then
+    printf 'error: canonical source path already exists with a different target: %s\n' \
+      "$canonical_source_dir" >&2
+    exit 1
+  fi
+else
+  mkdir -p "$(dirname "$canonical_source_dir")"
+  ln -s "$source_dir" "$canonical_source_dir"
+fi
+
 if [[ -e "$build_dir" ]] && [[ -n "$(find "$build_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
   printf 'error: build directory must be empty: %s\n' "$build_dir" >&2
   exit 1
@@ -147,6 +166,7 @@ mkdir -p "$object_dir" "$probe_dir"
 
 configure_args=(
   "--prefix=$CONFIGURED_PREFIX"
+  "--srcdir=$canonical_source_dir"
   "--disable-docs"
   "--disable-java"
   "--disable-static"
@@ -161,9 +181,9 @@ printf '%s\n' "${configure_args[@]}" > "$build_dir/configure-args.txt"
 
 configure_flags="-O2 -g0 -fPIC"
 compile_flags="$configure_flags \
--ffile-prefix-map=$source_dir=/usr/src/octave-$OCTAVE_VERSION \
--fmacro-prefix-map=$source_dir=/usr/src/octave-$OCTAVE_VERSION \
--fdebug-prefix-map=$source_dir=/usr/src/octave-$OCTAVE_VERSION \
+-ffile-prefix-map=$source_dir=$canonical_source_dir \
+-fmacro-prefix-map=$source_dir=$canonical_source_dir \
+-fdebug-prefix-map=$source_dir=$canonical_source_dir \
 -ffile-prefix-map=$build_dir=/usr/src/octave-build \
 -fmacro-prefix-map=$build_dir=/usr/src/octave-build \
 -fdebug-prefix-map=$build_dir=/usr/src/octave-build"
@@ -204,11 +224,12 @@ printf 'python=%s\n' "$(command -v "$python_command")"
 "$python_command" --version
 printf 'dependency_prefix=%s\n' "${dependency_prefix:-none}"
 printf 'source_dir=%s\n' "$source_dir"
+printf 'canonical_source_dir=%s\n' "$canonical_source_dir"
 printf 'build_dir=%s\n' "$build_dir"
 printf 'destination=%s\n' "$destination"
 
 pushd "$object_dir" >/dev/null
-"$source_dir/configure" "${configure_args[@]}" 2>&1 | tee "$build_dir/configure.out"
+"$canonical_source_dir/configure" "${configure_args[@]}" 2>&1 | tee "$build_dir/configure.out"
 make -j"$jobs" \
   CFLAGS="$compile_flags" \
   CXXFLAGS="$compile_flags" \
