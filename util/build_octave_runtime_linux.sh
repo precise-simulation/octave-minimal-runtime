@@ -475,7 +475,10 @@ Path(port_file).write_text(str(server.server_address[1]), encoding="ascii")
 server.serve_forever()
 PY
 
-  "$python_command" "$tls_probe_dir/https_server.py" \
+  # The manylinux Python distribution carries its own OpenSSL runtime.  Do not
+  # let the private Octave dependency prefix interpose its libcrypto/libssl on
+  # Python's _ssl extension while the local qualification server is running.
+  env -u LD_LIBRARY_PATH "$python_command" "$tls_probe_dir/https_server.py" \
     "$tls_probe_dir/server.crt" \
     "$tls_probe_dir/server.key" \
     "$tls_probe_dir/port" \
