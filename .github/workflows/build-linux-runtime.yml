@@ -400,7 +400,7 @@ jobs:
       - name: Upload glibc 2.17 Linux runtime
         uses: actions/upload-artifact@v7
         with:
-          name: featool-octave-runtime-linux-x64-glibc217
+          name: featool-octave-runtime-linux-x64
           path: artifacts/manylinux-runtime
           if-no-files-found: error
           compression-level: 0
@@ -465,7 +465,7 @@ jobs:
       - name: Download exact glibc 2.17 runtime artifact
         uses: actions/download-artifact@v8
         with:
-          name: featool-octave-runtime-linux-x64-glibc217
+          name: featool-octave-runtime-linux-x64
           path: ${{ runner.temp }}/manylinux-runtime-artifact
 
       - name: Verify archive and prepare deterministic TLS fixture
@@ -624,7 +624,7 @@ jobs:
       - name: Download current glibc 2.17 runtime
         uses: actions/download-artifact@v8
         with:
-          name: featool-octave-runtime-linux-x64-glibc217
+          name: featool-octave-runtime-linux-x64
           path: ${{ runner.temp }}/determinism/current
 
       - name: Download comparison run glibc 2.17 runtime
@@ -645,7 +645,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/determinism/previous"
           gh run download "$COMPARE_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
-            --name featool-octave-runtime-linux-x64-glibc217 \
+            --name featool-octave-runtime-linux-x64 \
             --dir "$RUNNER_TEMP/determinism/previous"
 
       - name: Compare fresh hosted build outputs
@@ -828,10 +828,10 @@ jobs:
           cat "$LINUX_RUNTIME/runtime-manifest.json" | python3 -c \
             "import json,sys; m=json.load(sys.stdin); print('payload_files='+str(m['payload_files'])); print('payload_bytes='+str(m['payload_bytes'])); print('abi_max_required='+json.dumps(m['abi_max_required'],sort_keys=True))"
 
-      - name: Upload Linux runtime
+      - name: Upload Ubuntu 22.04 diagnostic runtime
         uses: actions/upload-artifact@v7
         with:
-          name: featool-octave-runtime-linux-x64
+          name: featool-octave-runtime-linux-x64-ubuntu22-diagnostic
           path: |
             artifacts/featool-octave-runtime-linux-x64.tar.zst
             artifacts/featool-octave-runtime-linux-x64.tar.zst.sha256
@@ -842,12 +842,12 @@ jobs:
           compression-level: 0
           retention-days: 1
 
-      - name: Delete superseded Linux runtime artifacts
+      - name: Delete superseded Ubuntu 22.04 diagnostic artifacts
         if: ${{ success() && github.event_name != 'pull_request' }}
         uses: actions/github-script@v8
         with:
           script: |
-            const artifactName = 'featool-octave-runtime-linux-x64';
+            const artifactName = 'featool-octave-runtime-linux-x64-ubuntu22-diagnostic';
             const currentRunId = Number(context.runId);
             const currentBranch = context.ref.replace(/^refs\/heads\//, '');
             const artifacts = await github.paginate(

@@ -1,6 +1,7 @@
 name: Build Windows runtime
 
 on:
+  workflow_call:
   workflow_dispatch:
     inputs:
       qualify_featool:

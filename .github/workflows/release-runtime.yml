@@ -1,0 +1,119 @@
+﻿name: Publish runtime release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  build-windows:
+    uses: ./.github/workflows/build-windows-runtime.yml
+
+  build-linux:
+    uses: ./.github/workflows/build-linux-runtime.yml
+
+  publish:
+    name: Publish GitHub Release
+    needs:
+      - build-windows
+      - build-linux
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+
+    steps:
+      - name: Download Windows headless runtime
+        uses: actions/download-artifact@v8
+        with:
+          name: featool-octave-runtime-win-x64
+          path: release-assets/windows-headless
+
+      - name: Download Windows Qt runtime
+        uses: actions/download-artifact@v8
+        with:
+          name: featool-octave-runtime-win-x64-qt
+          path: release-assets/windows-qt
+
+      - name: Download canonical Linux runtime
+        uses: actions/download-artifact@v8
+        with:
+          name: featool-octave-runtime-linux-x64
+          path: release-assets/linux
+
+      - name: Verify release assets
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          (
+            cd release-assets/windows-headless
+            sha256sum --check --strict featool-octave-runtime-win-x64.7z.sha256
+          )
+          (
+            cd release-assets/windows-qt
+            sha256sum --check --strict featool-octave-runtime-win-x64-qt.7z.sha256
+          )
+          (
+            cd release-assets/linux
+            sha256sum --check --strict featool-octave-runtime-linux-x64.tar.zst.sha256
+          )
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest = json.loads(
+              Path('release-assets/linux/featool-octave-runtime-linux-x64.manifest.json').read_text(
+                  encoding='utf-8'
+              )
+          )
+          assert manifest['artifact'] == 'featool-octave-runtime-linux-x64'
+          assert manifest['selected_glibc_baseline'] == '2.17'
+          assert manifest['abi_max_required']['GLIBC'] == '2.17'
+          assert manifest['build_image'].startswith(
+              'quay.io/pypa/manylinux2014_x86_64@sha256:'
+          )
+          PY
+
+      - name: Publish release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          tag="$GITHUB_REF_NAME"
+          assets=(
+            release-assets/windows-headless/featool-octave-runtime-win-x64.7z
+            release-assets/windows-headless/featool-octave-runtime-win-x64.7z.sha256
+            release-assets/windows-qt/featool-octave-runtime-win-x64-qt.7z
+            release-assets/windows-qt/featool-octave-runtime-win-x64-qt.7z.sha256
+            release-assets/linux/featool-octave-runtime-linux-x64.tar.zst
+            release-assets/linux/featool-octave-runtime-linux-x64.tar.zst.sha256
+            release-assets/linux/featool-octave-runtime-linux-x64.manifest.json
+          )
+
+          printf 'Publishing assets for %s:\n' "$tag"
+          printf '  %s\n' "${assets[@]}"
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" "${assets[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          else
+            extra=()
+            if [[ "$tag" == *-* ]]; then
+              extra+=(--prerelease)
+            fi
+            gh release create "$tag" "${assets[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --generate-notes \
+              --title "Minimal GNU Octave runtime $tag" \
+              "${extra[@]}"
+          fi
